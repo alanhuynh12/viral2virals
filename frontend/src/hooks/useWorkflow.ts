@@ -6,16 +6,15 @@ import {
   getAnalysisStatus,
   updateAnalysis,
   submitProductInfo,
-  generatePrompt,
-  updatePrompt,
-  approvePrompt,
+  generatePromptVariants,
+  updatePromptVariant,
+  approvePromptVariant,
   uploadProductImage,
-  generateVideo,
-  getVideoStatus,
+  generateVideos,
+  getVideoStatuses,
   VideoAnalysis,
-  GenerationPrompt,
-  GeneratedVideo,
 } from '../services/api';
+import { GenerationPromptVariant, GeneratedVideoVariant } from '../types';
 
 type WorkflowStep =
   | 'upload'
@@ -37,19 +36,21 @@ interface UseWorkflowState {
   productName: string | null;
   productDescription: string | null;
   isSubmittingProduct: boolean;
-  prompt: GenerationPrompt | null;
-  isGeneratingPrompt: boolean;
-  isUpdatingPrompt: boolean;
-  isApprovingPrompt: boolean;
+  promptVariants: GenerationPromptVariant[];
+  isGeneratingPromptVariants: boolean;
+  updatingVariantIds: string[];
+  approvingVariantIds: string[];
   productImage: File | null;
   productImagePreview: string | null;
   isUploadingImage: boolean;
   imageUploadProgress: number;
-  generatedVideo: GeneratedVideo | null;
-  isGeneratingVideo: boolean;
+  generatedVideoVariants: GeneratedVideoVariant[];
+  isGeneratingVideos: boolean;
   originalVideoUrl: string | null;
   error: string | null;
 }
+
+const TERMINAL_VIDEO_STATUSES = ['complete', 'failed'];
 
 /**
  * Custom hook for managing the video generation workflow
@@ -66,16 +67,16 @@ export function useWorkflow() {
     productName: null,
     productDescription: null,
     isSubmittingProduct: false,
-    prompt: null,
-    isGeneratingPrompt: false,
-    isUpdatingPrompt: false,
-    isApprovingPrompt: false,
+    promptVariants: [],
+    isGeneratingPromptVariants: false,
+    updatingVariantIds: [],
+    approvingVariantIds: [],
     productImage: null,
     productImagePreview: null,
     isUploadingImage: false,
     imageUploadProgress: 0,
-    generatedVideo: null,
-    isGeneratingVideo: false,
+    generatedVideoVariants: [],
+    isGeneratingVideos: false,
     originalVideoUrl: null,
     error: null,
   });
@@ -92,7 +93,7 @@ export function useWorkflow() {
       try {
         // Try to get existing session ID from localStorage
         const storedSessionId = localStorage.getItem('sessionId');
-        
+
         if (storedSessionId) {
           console.log('Found stored session ID:', storedSessionId);
           // Verify session still exists by trying to get analysis status
@@ -115,10 +116,10 @@ export function useWorkflow() {
 
         console.log('Creating new session...');
         const session = await createSession();
-        
+
         // Store session ID in localStorage
         localStorage.setItem('sessionId', session.sessionId);
-        
+
         // Only update state if component is still mounted
         if (isSubscribed) {
           console.log('Session created:', session.sessionId);
@@ -290,15 +291,18 @@ export function useWorkflow() {
           currentStep: 'product-input', // Move to next step after saving
         }));
       } catch (error) {
-        // Check if it's a session not found error
-        const errorMessage = error instanceof Error ? error.message : 'Failed to update analysis';
-        
-        if (errorMessage.includes('Session not found') || errorMessage.includes('not found')) {
-          // Clear invalid session
+        const errorMessage =
+          error instanceof Error ? error.message : 'Failed to update analysis';
+
+        if (
+          errorMessage.includes('Session not found') ||
+          errorMessage.includes('not found')
+        ) {
           localStorage.removeItem('sessionId');
           setState((prev) => ({
             ...prev,
-            error: 'Session expired. Please refresh the page and upload your video again.',
+            error:
+              'Session expired. Please refresh the page and upload your video again.',
           }));
         } else {
           setState((prev) => ({
@@ -368,8 +372,7 @@ export function useWorkflow() {
           setState((prev) => ({
             ...prev,
             isSubmittingProduct: false,
-            error:
-              'Session expired. Please refresh the page and start over.',
+            error: 'Session expired. Please refresh the page and start over.',
           }));
         } else {
           setState((prev) => ({
@@ -384,62 +387,10 @@ export function useWorkflow() {
   );
 
   /**
-   * Generate prompt from analysis and product info
+   * Generate a batch of hook/prompt variants from analysis and product info
    */
-  const handleGeneratePrompt = useCallback(async () => {
-    if (!state.sessionId) {
-      setState((prev) => ({
-        ...prev,
-        error: 'No active session. Please refresh the page.',
-      }));
-      return;
-    }
-
-    setState((prev) => ({
-      ...prev,
-      isGeneratingPrompt: true,
-      error: null,
-    }));
-
-    try {
-      const generatedPrompt = await generatePrompt(state.sessionId);
-
-      setState((prev) => ({
-        ...prev,
-        isGeneratingPrompt: false,
-        prompt: generatedPrompt,
-      }));
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : 'Failed to generate prompt';
-
-      if (
-        errorMessage.includes('Session not found') ||
-        errorMessage.includes('not found')
-      ) {
-        localStorage.removeItem('sessionId');
-        setState((prev) => ({
-          ...prev,
-          isGeneratingPrompt: false,
-          error: 'Session expired. Please refresh the page and start over.',
-        }));
-      } else {
-        setState((prev) => ({
-          ...prev,
-          isGeneratingPrompt: false,
-          error: errorMessage,
-        }));
-      }
-    }
-  }, [state.sessionId]);
-
-  /**
-   * Update prompt with user edits
-   */
-  const handleUpdatePrompt = useCallback(
-    async (editedText: string) => {
+  const handleGeneratePromptVariants = useCallback(
+    async (count?: number) => {
       if (!state.sessionId) {
         setState((prev) => ({
           ...prev,
@@ -450,21 +401,23 @@ export function useWorkflow() {
 
       setState((prev) => ({
         ...prev,
-        isUpdatingPrompt: true,
+        isGeneratingPromptVariants: true,
         error: null,
       }));
 
       try {
-        const updatedPrompt = await updatePrompt(state.sessionId, editedText);
+        const variants = await generatePromptVariants(state.sessionId, count);
 
         setState((prev) => ({
           ...prev,
-          isUpdatingPrompt: false,
-          prompt: updatedPrompt,
+          isGeneratingPromptVariants: false,
+          promptVariants: variants,
         }));
       } catch (error) {
         const errorMessage =
-          error instanceof Error ? error.message : 'Failed to update prompt';
+          error instanceof Error
+            ? error.message
+            : 'Failed to generate prompt variants';
 
         if (
           errorMessage.includes('Session not found') ||
@@ -473,13 +426,13 @@ export function useWorkflow() {
           localStorage.removeItem('sessionId');
           setState((prev) => ({
             ...prev,
-            isUpdatingPrompt: false,
+            isGeneratingPromptVariants: false,
             error: 'Session expired. Please refresh the page and start over.',
           }));
         } else {
           setState((prev) => ({
             ...prev,
-            isUpdatingPrompt: false,
+            isGeneratingPromptVariants: false,
             error: errorMessage,
           }));
         }
@@ -489,61 +442,121 @@ export function useWorkflow() {
   );
 
   /**
-   * Approve prompt for video generation
+   * Update a single prompt variant with user edits
    */
-  const handleApprovePrompt = useCallback(async () => {
-    if (!state.sessionId) {
-      setState((prev) => ({
-        ...prev,
-        error: 'No active session. Please refresh the page.',
-      }));
-      return;
-    }
-
-    setState((prev) => ({
-      ...prev,
-      isApprovingPrompt: true,
-      error: null,
-    }));
-
-    try {
-      const approvedPrompt = await approvePrompt(state.sessionId);
-
-      setState((prev) => ({
-        ...prev,
-        isApprovingPrompt: false,
-        prompt: approvedPrompt,
-        currentStep: 'video-generation', // Move to next step after approval
-      }));
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Failed to approve prompt';
-
-      if (
-        errorMessage.includes('Session not found') ||
-        errorMessage.includes('not found')
-      ) {
-        localStorage.removeItem('sessionId');
+  const handleUpdatePromptVariant = useCallback(
+    async (variantId: string, editedText: string) => {
+      if (!state.sessionId) {
         setState((prev) => ({
           ...prev,
-          isApprovingPrompt: false,
-          error: 'Session expired. Please refresh the page and start over.',
+          error: 'No active session. Please refresh the page.',
         }));
-      } else {
+        return;
+      }
+
+      setState((prev) => ({
+        ...prev,
+        updatingVariantIds: [...prev.updatingVariantIds, variantId],
+        error: null,
+      }));
+
+      try {
+        const updatedVariant = await updatePromptVariant(
+          state.sessionId,
+          variantId,
+          editedText
+        );
+
         setState((prev) => ({
           ...prev,
-          isApprovingPrompt: false,
+          updatingVariantIds: prev.updatingVariantIds.filter(
+            (id) => id !== variantId
+          ),
+          promptVariants: prev.promptVariants.map((v) =>
+            v.variantId === variantId ? updatedVariant : v
+          ),
+        }));
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : 'Failed to update prompt variant';
+
+        setState((prev) => ({
+          ...prev,
+          updatingVariantIds: prev.updatingVariantIds.filter(
+            (id) => id !== variantId
+          ),
           error: errorMessage,
         }));
       }
-    }
-  }, [state.sessionId]);
+    },
+    [state.sessionId]
+  );
+
+  /**
+   * Approve a single prompt variant for video generation
+   */
+  const handleApprovePromptVariant = useCallback(
+    async (variantId: string) => {
+      if (!state.sessionId) {
+        setState((prev) => ({
+          ...prev,
+          error: 'No active session. Please refresh the page.',
+        }));
+        return;
+      }
+
+      setState((prev) => ({
+        ...prev,
+        approvingVariantIds: [...prev.approvingVariantIds, variantId],
+        error: null,
+      }));
+
+      try {
+        const approvedVariant = await approvePromptVariant(
+          state.sessionId,
+          variantId
+        );
+
+        setState((prev) => ({
+          ...prev,
+          approvingVariantIds: prev.approvingVariantIds.filter(
+            (id) => id !== variantId
+          ),
+          promptVariants: prev.promptVariants.map((v) =>
+            v.variantId === variantId ? approvedVariant : v
+          ),
+        }));
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : 'Failed to approve prompt variant';
+
+        setState((prev) => ({
+          ...prev,
+          approvingVariantIds: prev.approvingVariantIds.filter(
+            (id) => id !== variantId
+          ),
+          error: errorMessage,
+        }));
+      }
+    },
+    [state.sessionId]
+  );
+
+  /**
+   * Move to the video generation step once at least one variant is approved
+   */
+  const handleContinueToVideoGeneration = useCallback(() => {
+    setState((prev) => ({ ...prev, currentStep: 'video-generation' }));
+  }, []);
 
   /**
    * Handle product image selection
    */
   const handleImageSelect = useCallback((file: File) => {
-    // Create preview URL
     const previewUrl = URL.createObjectURL(file);
 
     setState((prev) => ({
@@ -573,12 +586,16 @@ export function useWorkflow() {
     }));
 
     try {
-      await uploadProductImage(state.sessionId, state.productImage, (progress) => {
-        setState((prev) => ({
-          ...prev,
-          imageUploadProgress: progress,
-        }));
-      });
+      await uploadProductImage(
+        state.sessionId,
+        state.productImage,
+        (progress) => {
+          setState((prev) => ({
+            ...prev,
+            imageUploadProgress: progress,
+          }));
+        }
+      );
 
       setState((prev) => ({
         ...prev,
@@ -598,9 +615,9 @@ export function useWorkflow() {
   }, [state.sessionId, state.productImage]);
 
   /**
-   * Generate video using Sora 2
+   * Batch-generate multi-clip Veo videos for every approved prompt variant
    */
-  const handleGenerateVideo = useCallback(async () => {
+  const handleGenerateVideos = useCallback(async () => {
     if (!state.sessionId) {
       setState((prev) => ({
         ...prev,
@@ -611,51 +628,49 @@ export function useWorkflow() {
 
     setState((prev) => ({
       ...prev,
-      isGeneratingVideo: true,
+      isGeneratingVideos: true,
       error: null,
     }));
 
     try {
-      const video = await generateVideo(state.sessionId);
+      const videos = await generateVideos(state.sessionId);
 
       setState((prev) => ({
         ...prev,
-        generatedVideo: video,
+        generatedVideoVariants: videos,
       }));
 
-      // Start polling for video status
+      // Start polling for batch video status
       if (videoPollingInterval.current) {
         clearInterval(videoPollingInterval.current);
       }
 
       videoPollingInterval.current = setInterval(async () => {
         try {
-          const status = await getVideoStatus(state.sessionId!);
+          const statuses = await getVideoStatuses(state.sessionId!);
 
           setState((prev) => ({
             ...prev,
-            generatedVideo: status,
+            generatedVideoVariants: statuses,
           }));
 
-          if (status.status === 'complete') {
+          const allTerminal =
+            statuses.length > 0 &&
+            statuses.every((v) => TERMINAL_VIDEO_STATUSES.includes(v.status));
+
+          if (allTerminal) {
             if (videoPollingInterval.current) {
               clearInterval(videoPollingInterval.current);
               videoPollingInterval.current = null;
             }
+            const anyComplete = statuses.some((v) => v.status === 'complete');
             setState((prev) => ({
               ...prev,
-              isGeneratingVideo: false,
-              currentStep: 'complete',
-            }));
-          } else if (status.status === 'failed') {
-            if (videoPollingInterval.current) {
-              clearInterval(videoPollingInterval.current);
-              videoPollingInterval.current = null;
-            }
-            setState((prev) => ({
-              ...prev,
-              isGeneratingVideo: false,
-              error: status.error?.message || 'Video generation failed',
+              isGeneratingVideos: false,
+              currentStep: anyComplete ? 'complete' : prev.currentStep,
+              error: anyComplete
+                ? null
+                : 'All video variants failed to generate. Please review the errors and try again.',
             }));
           }
         } catch (error) {
@@ -666,14 +681,14 @@ export function useWorkflow() {
           }
           setState((prev) => ({
             ...prev,
-            isGeneratingVideo: false,
+            isGeneratingVideos: false,
             error:
               error instanceof Error
                 ? error.message
                 : 'Failed to check video status',
           }));
         }
-      }, 4000); // Poll every 4 seconds (within 3-5 second range)
+      }, 5000); // Poll every 5 seconds - batch jobs take longer than a single clip
     } catch (error) {
       const errorMessage =
         error instanceof Error
@@ -687,13 +702,13 @@ export function useWorkflow() {
         localStorage.removeItem('sessionId');
         setState((prev) => ({
           ...prev,
-          isGeneratingVideo: false,
+          isGeneratingVideos: false,
           error: 'Session expired. Please refresh the page and start over.',
         }));
       } else {
         setState((prev) => ({
           ...prev,
-          isGeneratingVideo: false,
+          isGeneratingVideos: false,
           error: errorMessage,
         }));
       }
@@ -717,12 +732,13 @@ export function useWorkflow() {
     triggerAnalysis: handleTriggerAnalysis,
     updateAnalysis: handleUpdateAnalysis,
     submitProductInfo: handleSubmitProductInfo,
-    generatePrompt: handleGeneratePrompt,
-    updatePrompt: handleUpdatePrompt,
-    approvePrompt: handleApprovePrompt,
+    generatePromptVariants: handleGeneratePromptVariants,
+    updatePromptVariant: handleUpdatePromptVariant,
+    approvePromptVariant: handleApprovePromptVariant,
+    continueToVideoGeneration: handleContinueToVideoGeneration,
     selectProductImage: handleImageSelect,
     uploadProductImage: handleUploadProductImage,
-    generateVideo: handleGenerateVideo,
+    generateVideos: handleGenerateVideos,
     clearError,
   };
 }

@@ -1,11 +1,11 @@
-import { GeneratedVideo } from '../../../common/types/generation.types';
+import { GeneratedVideoVariant } from '../../../common/types/generation.types';
 
 /**
- * DTO for video generation status polling response
+ * DTO for batch video generation status polling response
  */
 export class GetVideoStatusResponseDto {
   success!: boolean;
-  data!: GeneratedVideo;
+  data!: GeneratedVideoVariant[];
   meta!: {
     timestamp: string;
     requestId: string;

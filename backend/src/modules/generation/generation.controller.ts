@@ -20,19 +20,19 @@ export class GenerationController {
 
   /**
    * POST /sessions/:sessionId/generate
-   * Generate video using Sora 2 with approved prompt and product image
+   * Batch-generate multi-clip Veo videos for every approved prompt variant
    */
   @Post('generate')
   @HttpCode(HttpStatus.ACCEPTED)
-  async generateVideo(
+  async generateVideos(
     @Param('sessionId') sessionId: string,
   ): Promise<GenerateVideoResponseDto> {
-    const generatedVideo =
-      await this.generationService.generateVideo(sessionId);
+    const generatedVideos =
+      await this.generationService.generateVideos(sessionId);
 
     return {
       success: true,
-      data: generatedVideo,
+      data: generatedVideos,
       meta: {
         timestamp: new Date().toISOString(),
         requestId: `req_${uuidv4()}`,
@@ -42,18 +42,18 @@ export class GenerationController {
 
   /**
    * GET /sessions/:sessionId/generate
-   * Get video generation status and download URL when complete
+   * Get video generation status (and download URLs when complete) for every variant
    */
   @Get('generate')
   async getVideoStatus(
     @Param('sessionId') sessionId: string,
   ): Promise<GetVideoStatusResponseDto> {
-    const generatedVideo =
+    const generatedVideos =
       await this.generationService.getVideoStatus(sessionId);
 
     return {
       success: true,
-      data: generatedVideo,
+      data: generatedVideos,
       meta: {
         timestamp: new Date().toISOString(),
         requestId: `req_${uuidv4()}`,

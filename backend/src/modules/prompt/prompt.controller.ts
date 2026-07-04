@@ -1,14 +1,15 @@
 /**
  * Prompt Controller
  *
- * Handles HTTP endpoints for text-to-video prompt generation,
- * editing, and approval.
+ * Handles HTTP endpoints for batch text-to-video prompt variant
+ * generation, editing, and approval.
  */
 
 import {
   Controller,
   Post,
   Patch,
+  Get,
   Param,
   Body,
   HttpCode,
@@ -16,6 +17,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PromptService } from './prompt.service';
+import { GeneratePromptRequestDto } from './dto/generate-prompt-request.dto';
 import { UpdatePromptRequestDto } from './dto/update-prompt-request.dto';
 import { GeneratePromptResponseDto } from './dto/generate-prompt-response.dto';
 import { UpdatePromptResponseDto } from './dto/update-prompt-response.dto';
@@ -23,7 +25,7 @@ import { ApprovePromptResponseDto } from './dto/approve-prompt-response.dto';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * PromptController handles prompt generation and management endpoints
+ * PromptController handles prompt variant generation and management endpoints
  * Base path: /sessions/:sessionId/prompt
  */
 @Controller('sessions/:sessionId/prompt')
@@ -33,24 +35,29 @@ export class PromptController {
   constructor(private readonly promptService: PromptService) {}
 
   /**
-   * POST /sessions/:sessionId/prompt
-   * Generate a text-to-video prompt from video analysis and product info
+   * POST /sessions/:sessionId/prompt/variants
+   * Generate a batch of hook/prompt variants from video analysis and product info
    *
    * @param sessionId - Session identifier
-   * @returns Generated prompt with moderation status
+   * @param dto - Optional variant count
+   * @returns Generated prompt variants with moderation status
    */
-  @Post()
+  @Post('variants')
   @HttpCode(HttpStatus.OK)
-  async generatePrompt(
+  async generatePromptVariants(
     @Param('sessionId') sessionId: string,
+    @Body() dto: GeneratePromptRequestDto,
   ): Promise<GeneratePromptResponseDto> {
-    this.logger.log(`POST /sessions/${sessionId}/prompt`);
+    this.logger.log(`POST /sessions/${sessionId}/prompt/variants`);
 
-    const prompt = await this.promptService.generatePrompt(sessionId);
+    const variants = await this.promptService.generatePromptVariants(
+      sessionId,
+      dto.count,
+    );
 
     return {
       success: true,
-      data: prompt,
+      data: variants,
       meta: {
         timestamp: new Date().toISOString(),
         requestId: uuidv4(),
@@ -59,29 +66,50 @@ export class PromptController {
   }
 
   /**
-   * PATCH /sessions/:sessionId/prompt
-   * Update prompt with user edits
-   *
-   * @param sessionId - Session identifier
-   * @param dto - Request body with edited text
-   * @returns Updated prompt with new moderation status
+   * GET /sessions/:sessionId/prompt/variants
+   * Retrieve the currently stored prompt variants (for polling/refresh)
    */
-  @Patch()
+  @Get('variants')
   @HttpCode(HttpStatus.OK)
-  async updatePrompt(
+  async getPromptVariants(
     @Param('sessionId') sessionId: string,
+  ): Promise<GeneratePromptResponseDto> {
+    const variants = await this.promptService.getPromptVariants(sessionId);
+
+    return {
+      success: true,
+      data: variants,
+      meta: {
+        timestamp: new Date().toISOString(),
+        requestId: uuidv4(),
+      },
+    };
+  }
+
+  /**
+   * PATCH /sessions/:sessionId/prompt/variants/:variantId
+   * Update a single prompt variant with user edits
+   */
+  @Patch('variants/:variantId')
+  @HttpCode(HttpStatus.OK)
+  async updatePromptVariant(
+    @Param('sessionId') sessionId: string,
+    @Param('variantId') variantId: string,
     @Body() dto: UpdatePromptRequestDto,
   ): Promise<UpdatePromptResponseDto> {
-    this.logger.log(`PATCH /sessions/${sessionId}/prompt`);
+    this.logger.log(
+      `PATCH /sessions/${sessionId}/prompt/variants/${variantId}`,
+    );
 
-    const prompt = await this.promptService.updatePrompt(
+    const variant = await this.promptService.updatePromptVariant(
       sessionId,
+      variantId,
       dto.editedText,
     );
 
     return {
       success: true,
-      data: prompt,
+      data: variant,
       meta: {
         timestamp: new Date().toISOString(),
         requestId: uuidv4(),
@@ -90,24 +118,27 @@ export class PromptController {
   }
 
   /**
-   * POST /sessions/:sessionId/prompt/approve
-   * Approve prompt for video generation
-   *
-   * @param sessionId - Session identifier
-   * @returns Approved prompt
+   * POST /sessions/:sessionId/prompt/variants/:variantId/approve
+   * Approve a single prompt variant for video generation
    */
-  @Post('approve')
+  @Post('variants/:variantId/approve')
   @HttpCode(HttpStatus.OK)
-  async approvePrompt(
+  async approvePromptVariant(
     @Param('sessionId') sessionId: string,
+    @Param('variantId') variantId: string,
   ): Promise<ApprovePromptResponseDto> {
-    this.logger.log(`POST /sessions/${sessionId}/prompt/approve`);
+    this.logger.log(
+      `POST /sessions/${sessionId}/prompt/variants/${variantId}/approve`,
+    );
 
-    const prompt = await this.promptService.approvePrompt(sessionId);
+    const variant = await this.promptService.approvePromptVariant(
+      sessionId,
+      variantId,
+    );
 
     return {
       success: true,
-      data: prompt,
+      data: variant,
       meta: {
         timestamp: new Date().toISOString(),
         requestId: uuidv4(),

@@ -162,6 +162,33 @@ For local development without incurring API costs, set `MOCK_ANALYSIS=true` and 
 
 See [specs/001-ugc-video-generator/contracts/openapi.yaml](specs/001-ugc-video-generator/contracts/openapi.yaml) for full API specification.
 
+## Deployment
+
+### Frontend → Vercel
+
+The frontend is a static Vite/React build and deploys to Vercel with zero friction (`frontend/vercel.json` is included, framework auto-detected).
+
+1. Import the repo into Vercel, set the project **Root Directory** to `frontend`.
+2. Set the environment variable `VITE_API_BASE_URL` to your deployed backend's URL (e.g. `https://your-backend.example.com/api`).
+3. Deploy - build command `npm run build`, output directory `dist` (already configured in `vercel.json`).
+
+Or via the CLI: `cd frontend && vercel --prod` (requires a Vercel account/token).
+
+### Backend → Railway / Render / Fly.io / any Docker host (not Vercel)
+
+**The backend intentionally does not deploy to Vercel serverless functions.** It relies on:
+- in-memory session state that must survive across requests (a `Map`, not a database) - serverless functions are stateless and can hit a different cold instance per request, silently losing session data
+- the `ffmpeg` binary for stitching per-scene Veo clips together
+- long-running (potentially 10-30+ minute) batch AI video generation jobs that don't fit within serverless function time limits
+
+Instead, it ships as a `Dockerfile` (`backend/Dockerfile`) that runs as a normal persistent container - a great fit for Railway, Render, Fly.io, Google Cloud Run (with `min-instances >= 1`), or any VM:
+
+- **Railway**: connect the repo, set root directory to `backend` - `backend/railway.json` configures the Dockerfile build and health check automatically.
+- **Render**: use the included `render.yaml` Blueprint at the repo root (`render.yaml` → Blueprints → New Blueprint Instance), or manually create a Web Service with Docker runtime pointing at `backend/Dockerfile`.
+- **Fly.io / Cloud Run / any Docker host**: `docker build -t viral2viral-backend ./backend && docker run -p 3000:3000 --env-file backend/.env viral2viral-backend`, or use each platform's native Dockerfile deploy flow.
+
+In all cases, configure the same environment variables as `backend/.env.example`, and set the frontend's `VITE_API_BASE_URL` to point at the deployed backend, and the backend's `CORS_ORIGIN` to point at the deployed frontend.
+
 ## Development
 
 - **Backend Tests**: `cd backend && npm test`

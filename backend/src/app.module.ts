@@ -13,6 +13,7 @@ import { ProductModule } from './modules/product/product.module';
 import { PromptModule } from './modules/prompt/prompt.module';
 import { GenerationModule } from './modules/generation/generation.module';
 import { SessionService } from './common/session.service';
+import { HealthController } from './health.controller';
 
 @Global()
 @Module({
@@ -25,6 +26,7 @@ import { SessionService } from './common/session.service';
     PromptModule,
     GenerationModule,
   ],
+  controllers: [HealthController],
   providers: [SessionService],
   exports: [SessionService],
 })

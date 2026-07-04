@@ -203,11 +203,12 @@ export class S3Service {
   }
 
   /**
-   * Generate S3 key for generated video
+   * Generate S3 key for a generated video variant
    * @param sessionId - Session UUID
+   * @param variantId - Generated video variant UUID
    * @returns S3 key path
    */
-  generateGeneratedVideoKey(sessionId: string): string {
-    return `sessions/${sessionId}/generated.mp4`;
+  generateGeneratedVideoKey(sessionId: string, variantId: string): string {
+    return `sessions/${sessionId}/generated-${variantId}.mp4`;
   }
 }

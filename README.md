@@ -1,10 +1,10 @@
 # viral2viral - UGC Advertisement Video Generator
 
-An AI-powered application that analyzes successful UGC (User-Generated Content) advertisement videos and generates new promotional videos for your products based on the same style and techniques.
+An AI-powered application that analyzes successful UGC (User-Generated Content) advertisement videos and generates new, fast-paced, TikTok/Reels-style promotional videos for your products based on the same style and techniques.
 
 ## Overview
 
-viral2viral allows marketers to upload a reference UGC advertisement video, extracts key insights using AI (visual style, messaging tone, pacing, engagement techniques), and then generates a brand-new advertisement video for their product while maintaining the successful elements of the original.
+viral2viral allows marketers to upload a reference UGC advertisement video, extracts a structured scene-by-scene breakdown using AI (hook classification, per-scene pacing/cuts, on-screen captions, audio), and then generates several brand-new advertisement video variants for their product - each rendered scene-by-scene with Google Veo and stitched into a fast-paced vertical video - while maintaining the successful elements of the original.
 
 **[Watch Demo on YouTube](https://youtu.be/Ylw-e1AayGE)**
 
@@ -12,22 +12,23 @@ viral2viral allows marketers to upload a reference UGC advertisement video, extr
 
 ## Features
 
-- **Video Upload & Analysis**: Upload UGC advertisement videos (MP4, MOV, AVI up to 100MB) and get AI-powered analysis of visual style, messaging, pacing, and engagement techniques
+- **Video Upload & Structured Analysis**: Upload UGC advertisement videos (MP4, MOV, AVI up to 100MB) and get an AI-powered, structured scene-by-scene breakdown: hook classification, per-scene cut timing, on-screen captions, and objective pacing metrics (cut count, average shot length)
 - **Product Customization**: Input your product details (name, description, image) to personalize the generated advertisement
-- **AI Prompt Generation**: Automatically generate and moderate text-to-video prompts combining insights from the original video with your product information
-- **Video Generation**: Create new advertisement videos using advanced AI video generation services (Sora, Laozhang)
-- **Side-by-Side Comparison**: View original and generated videos together to compare results
+- **Batch Hook/Prompt Variants**: Automatically generate several distinct hook angles (pattern interrupt, bold claim, question, relatable problem, visual shock, social proof), each broken into per-scene Veo prompts, with built-in content moderation
+- **Multi-Clip Video Generation**: Each approved variant is rendered scene-by-scene with Google Veo 3/3.1 and stitched into a single fast-paced vertical (9:16) video with `ffmpeg` - instead of relying on one monolithic generation call
+- **Side-by-Side Comparison**: View the original video alongside every generated variant to compare results
 - **Cloud Storage**: All videos and assets are stored securely in AWS S3
 
 ## Tech Stack
 
 ### Backend
 - **Framework**: NestJS (Node.js/TypeScript)
-- **Video Analysis**: Google Gemini 2.5 Flash API
-- **Text Generation**: OpenAI GPT-5 (via Laozhang API)
-- **Video Generation**: OpenAI Sora 2 (via Laozhang API)
+- **Video Analysis**: Google Gemini 2.5 Flash API (structured JSON scene/hook/caption extraction)
+- **Text Generation**: OpenAI GPT-5 (via Laozhang API) - generates per-scene Veo prompts for multiple hook variants
+- **Video Generation**: Google Veo 3 / 3.1 (`veo-3.0-generate-001`, `veo-3.1-generate-preview`, or their `-fast` variants) via `@google/genai`
+- **Video Assembly**: `ffmpeg` for normalizing and concatenating per-scene clips into one stitched video
 - **Storage**: AWS S3 with presigned URLs
-- **Architecture**: Modular structure with separate services for analysis, generation, prompts, products, storage, and sessions
+- **Architecture**: Modular structure with separate services for analysis, generation (Veo + stitching), prompts, products, storage, and sessions
 
 ### Frontend
 - **Framework**: React 18 with TypeScript
@@ -49,9 +50,9 @@ viral2viral/
 ├── backend/              # NestJS API server
 │   └── src/
 │       ├── modules/      # Feature modules
-│       │   ├── analysis/ # Video analysis with Gemini
-│       │   ├── generation/ # Video generation orchestration
-│       │   ├── prompt/   # Prompt generation & moderation
+│       │   ├── analysis/ # Structured video analysis with Gemini
+│       │   ├── generation/ # Veo multi-clip generation + ffmpeg stitching
+│       │   ├── prompt/   # Batch hook/prompt variant generation & moderation
 │       │   ├── product/  # Product information management
 │       │   ├── sessions/ # Session state management
 │       │   ├── storage/  # AWS S3 integration
@@ -79,11 +80,11 @@ See example generated videos in [`scripts/output/`](scripts/output/):
 
 ### Prerequisites
 - Node.js 18+
+- `ffmpeg` available on the backend host (used to stitch scene clips together)
 - AWS account with S3 bucket configured
 - API keys for:
-  - Google Gemini API
-  - OpenAI API
-  - Laozhang API (optional)
+  - Google Gemini API (also used for Veo video generation)
+  - Laozhang API (for GPT-5 prompt text generation)
 
 ### Installation
 
@@ -134,14 +135,28 @@ npm run dev
 ## Workflow
 
 1. **Upload Reference Video**: Upload a successful UGC advertisement video
-2. **Analyze**: AI extracts key elements (style, tone, pacing, techniques)
-3. **Edit Analysis**: Review and modify the analysis if needed
-4. **Add Product Info**: Enter your product name, description, and upload product image
-5. **Generate Prompt**: AI creates a text-to-video prompt combining insights + product
-6. **Moderate & Approve**: Review and edit the prompt
-7. **Generate Video**: Create your new advertisement video
-8. **Compare**: View original and generated videos side-by-side
-9. **Download**: Save your generated video
+2. **Analyze**: AI extracts a structured scene-by-scene breakdown (hook type, per-scene pacing/cuts, captions, cut count, average shot length)
+3. **Edit Analysis**: Review and modify the analysis JSON if needed
+4. **Add Product Info**: Enter your product name, description, and upload product image (optional)
+5. **Generate Hook Variants**: AI generates several distinct hook angles, each with its own set of per-scene Veo prompts
+6. **Moderate & Approve**: Review, edit, and approve one or more variants
+7. **Generate Videos**: Each approved variant is rendered scene-by-scene with Veo and stitched into a fast-paced vertical video
+8. **Compare**: View the original video alongside every generated variant, with per-scene render progress
+9. **Download**: Save any of the generated videos
+
+## Video Generation Architecture
+
+Rather than sending one large prompt to a text-to-video model and hoping it produces the right number of cuts, each approved hook variant is generated **scene-by-scene**:
+
+1. The structured analysis breaks the source video into 3-6 scenes (hook/problem/solution/benefit/cta) with per-scene duration, pacing, and captions.
+2. GPT-5 turns each scene into its own Veo-ready text prompt (subject/action, camera, dialogue in quotes, SFX) for every hook variant.
+3. Each scene is rendered as an independent Veo clip (4/6/8s, snapped from the source scene's duration), optionally anchoring the first scene with the uploaded product image.
+4. All scene clips for a variant are normalized (resolution/fps/codec) and concatenated with `ffmpeg` into a single stitched vertical (9:16) video.
+5. The stitched video is uploaded to S3 and returned to the user for playback/download.
+
+This keeps cut timing, pacing, and per-scene dialogue much closer to the original fast-paced source video than a single monolithic generation call.
+
+For local development without incurring API costs, set `MOCK_ANALYSIS=true` and `MOCK_VIDEO_GENERATION=true` in `backend/.env` - this synthesizes placeholder clips with `ffmpeg` so the full multi-clip + batch-variant pipeline can be exercised end-to-end for free.
 
 ## API Documentation
 

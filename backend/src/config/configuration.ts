@@ -18,23 +18,42 @@ export interface Configuration {
     s3Bucket: string;
   };
 
-  // Google Gemini
+  // Google Gemini (video understanding / analysis)
   gemini: {
     apiKey: string;
     model: string;
+    /** When true, skip the real Gemini video-understanding call and return a fixture analysis (for local/dev testing without cost) */
+    mock: boolean;
   };
 
-  // OpenAI via laozhang.ai
+  // Google Veo (video generation)
+  veo: {
+    apiKey: string;
+    model: string;
+    aspectRatio: string;
+    resolution: string;
+    /** When true, skip real Veo API calls and synthesize placeholder clips with ffmpeg (for local/dev testing without cost) */
+    mock: boolean;
+  };
+
+  // OpenAI via laozhang.ai (used only for text prompt engineering, not video generation)
   openai: {
     apiKey: string;
     baseUrl: string;
     gptModel: string;
-    soraModel: string;
   };
 
   // CORS
   cors: {
     origin: string;
+  };
+
+  // Batch generation
+  generation: {
+    /** Default number of hook/prompt variants generated per batch */
+    defaultVariantCount: number;
+    /** Max scene clips allowed per variant, to bound cost/latency */
+    maxScenesPerVariant: number;
   };
 }
 
@@ -42,6 +61,9 @@ export interface Configuration {
  * Load configuration from environment variables
  */
 export const loadConfiguration = (): Configuration => {
+  const geminiApiKey =
+    process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || '';
+
   return {
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
@@ -54,20 +76,42 @@ export const loadConfiguration = (): Configuration => {
     },
 
     gemini: {
-      apiKey:
-        process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || '',
+      apiKey: geminiApiKey,
       model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      mock: (process.env.MOCK_ANALYSIS || '').toLowerCase() === 'true',
+    },
+
+    veo: {
+      // Veo is served through the same Gemini API, so it reuses the Gemini key by default
+      apiKey: process.env.VEO_API_KEY || geminiApiKey,
+      model: process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview',
+      aspectRatio: process.env.VEO_ASPECT_RATIO || '9:16',
+      resolution: process.env.VEO_RESOLUTION || '720p',
+      mock: (process.env.MOCK_VIDEO_GENERATION || '').toLowerCase() === 'true',
     },
 
     openai: {
       apiKey: process.env.LAOZHANG_API_KEY || process.env.OPENAI_API_KEY || '',
-      baseUrl: process.env.LAOZHANG_API_BASE_URL || process.env.OPENAI_API_BASE_URL || 'https://api.laozhang.ai/v1',
+      baseUrl:
+        process.env.LAOZHANG_API_BASE_URL ||
+        process.env.OPENAI_API_BASE_URL ||
+        'https://api.laozhang.ai/v1',
       gptModel: process.env.OPENAI_GPT_MODEL || 'gpt-5',
-      soraModel: process.env.OPENAI_SORA_MODEL || 'sora-2',
     },
 
     cors: {
       origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+    },
+
+    generation: {
+      defaultVariantCount: parseInt(
+        process.env.DEFAULT_VARIANT_COUNT || '3',
+        10,
+      ),
+      maxScenesPerVariant: parseInt(
+        process.env.MAX_SCENES_PER_VARIANT || '6',
+        10,
+      ),
     },
   };
 };
@@ -87,7 +131,7 @@ export const validateConfiguration = (config: Configuration): void => {
       key: 'GEMINI_API_KEY or GOOGLE_GEMINI_API_KEY',
       value: config.gemini.apiKey,
     },
-    // OPENAI_API_KEY is optional for now (needed in later phases)
+    // VEO_API_KEY falls back to the Gemini key; OPENAI/LAOZHANG key only needed for prompt text generation
   ];
 
   const missingFields = requiredFields

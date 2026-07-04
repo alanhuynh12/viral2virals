@@ -25,8 +25,8 @@ export interface Session {
   originalVideo?: OriginalVideo;
   videoAnalysis?: VideoAnalysis;
   productInformation?: ProductInformation;
-  generationPrompt?: GenerationPrompt;
-  generatedVideo?: GeneratedVideo;
+  promptVariants?: GenerationPromptVariant[];
+  generatedVideoVariants?: GeneratedVideoVariant[];
 }
 
 // Video types
@@ -50,11 +50,83 @@ export enum AnalysisStatus {
   FAILED = 'failed',
 }
 
+export enum HookType {
+  PATTERN_INTERRUPT = 'pattern_interrupt',
+  BOLD_CLAIM = 'bold_claim',
+  QUESTION = 'question',
+  RELATABLE_PROBLEM = 'relatable_problem',
+  VISUAL_SHOCK = 'visual_shock',
+  SOCIAL_PROOF = 'social_proof',
+  OTHER = 'other',
+}
+
+export interface SceneCaption {
+  text: string;
+  position: 'top' | 'center' | 'bottom';
+  style?: string;
+  startTime?: number;
+  endTime?: number;
+}
+
+export interface Scene {
+  sceneIndex: number;
+  timestamp: string;
+  startTimeSeconds?: number;
+  duration: number;
+  purpose: string;
+  hookType?: HookType;
+  visualDetails: {
+    cameraAngle?: string;
+    movement?: string;
+    lighting?: string;
+    colorPalette?: string;
+    onScreenElements?: string;
+  };
+  cinematicDetails: {
+    shotType?: string;
+    pacing?: string;
+    style?: string;
+    cutCount?: number;
+  };
+  audioDetails: {
+    dialogue?: string;
+    soundDesign?: string;
+    timing?: string;
+  };
+  captions?: SceneCaption[];
+}
+
+export interface AnalysisStructuredData {
+  scenes: Scene[];
+  hook?: {
+    type: HookType;
+    text: string;
+    durationSeconds: number;
+  };
+  overallAesthetic?: string;
+  dominantColors?: string[];
+  pacing?: string;
+  audioStyle?: string;
+  musicStyle?: string;
+  captionStyle?: {
+    fontFamily?: string;
+    textColor?: string;
+    backgroundStyle?: string;
+    position?: 'top' | 'center' | 'bottom';
+    animation?: string;
+  };
+  recommendedAspectRatio?: '9:16' | '16:9' | '1:1';
+  totalDurationSeconds?: number;
+  cutCount?: number;
+  averageShotDurationSeconds?: number;
+}
+
 export interface VideoAnalysis {
   analysisId: string;
   analyzedAt: string;
   status: AnalysisStatus;
   sceneBreakdown: string;
+  structuredData?: AnalysisStructuredData;
   userEdits?: string;
   error?: {
     code: string;
@@ -73,7 +145,7 @@ export interface ProductInformation {
   downloadUrl?: string;
 }
 
-// Prompt types
+// Prompt variant types
 export enum ModerationStatus {
   PENDING = 'pending',
   APPROVED = 'approved',
@@ -81,11 +153,21 @@ export enum ModerationStatus {
   BYPASSED = 'bypassed',
 }
 
-export interface GenerationPrompt {
-  promptId: string;
-  generatedText: string;
-  userEditedText?: string;
-  finalText: string;
+export interface ScenePrompt {
+  sceneIndex: number;
+  purpose: string;
+  durationSeconds: number;
+  text: string;
+}
+
+export interface GenerationPromptVariant {
+  variantId: string;
+  hookLabel: string;
+  hookType: HookType;
+  scenePrompts: ScenePrompt[];
+  summaryText: string;
+  userEditedSummaryText?: string;
+  finalSummaryText: string;
   characterCount: number;
   generatedAt: string;
   approvedAt?: string;
@@ -101,17 +183,26 @@ export enum GenerationStatus {
   FAILED = 'failed',
 }
 
-export interface GeneratedVideo {
-  generatedVideoId: string;
+export interface SceneClipStatus {
+  sceneIndex: number;
+  purpose: string;
+  status: GenerationStatus;
+  error?: string;
+}
+
+export interface GeneratedVideoVariant {
+  variantId: string;
+  promptVariantId: string;
+  hookLabel: string;
   s3Key: string;
   s3Bucket: string;
   fileName: string;
   fileSize?: number;
   mimeType: string;
   status: GenerationStatus;
+  sceneClips: SceneClipStatus[];
   initiatedAt: string;
   completedAt?: string;
-  estimatedCompletionTime?: string;
   downloadUrl?: string;
   error?: {
     code: string;

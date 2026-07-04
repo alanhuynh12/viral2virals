@@ -1,7 +1,9 @@
 /**
  * Main App Component
  *
- * Root component with workflow components for User Story 1.
+ * Root component wiring together the full UGC ad cloning workflow:
+ * upload -> AI analysis -> product info -> batch hook/prompt variants ->
+ * batch multi-clip Veo video generation -> compare & download.
  */
 
 import { useWorkflow } from './hooks/useWorkflow';
@@ -9,9 +11,10 @@ import { VideoUpload } from './components/VideoUpload';
 import { AnalysisDisplay } from './components/AnalysisDisplay';
 import { ProgressIndicator } from './components/ProgressIndicator';
 import { ProductInput } from './components/ProductInput';
-import { PromptEditor } from './components/PromptEditor';
+import { PromptVariantsEditor } from './components/PromptVariantsEditor';
 import { ImageUpload } from './components/ImageUpload';
 import { VideoPlayer } from './components/VideoPlayer';
+import { GeneratedVideoCard } from './components/GeneratedVideoCard';
 
 function App() {
   const {
@@ -21,26 +24,27 @@ function App() {
     isAnalyzing,
     analysis,
     isSubmittingProduct,
-    prompt,
-    isGeneratingPrompt,
-    isUpdatingPrompt,
-    isApprovingPrompt,
+    promptVariants,
+    isGeneratingPromptVariants,
+    updatingVariantIds,
+    approvingVariantIds,
     productImagePreview,
     isUploadingImage,
     imageUploadProgress,
-    generatedVideo,
-    isGeneratingVideo,
+    generatedVideoVariants,
+    isGeneratingVideos,
     originalVideoUrl,
     error,
     uploadVideo,
     updateAnalysis,
     submitProductInfo,
-    generatePrompt,
-    updatePrompt,
-    approvePrompt,
+    generatePromptVariants,
+    updatePromptVariant,
+    approvePromptVariant,
+    continueToVideoGeneration,
     selectProductImage,
     uploadProductImage,
-    generateVideo: startGenerateVideo,
+    generateVideos,
     clearError,
   } = useWorkflow();
 
@@ -48,8 +52,8 @@ function App() {
     'Upload Video',
     'AI Analysis',
     'Product Info',
-    'Generate Prompt',
-    'Generate Video',
+    'Choose Hooks',
+    'Generate Videos',
   ];
 
   const getStepIndex = () => {
@@ -73,6 +77,13 @@ function App() {
     }
   };
 
+  const approvedVariantCount = promptVariants.filter(
+    (v) => v.approvedAt
+  ).length;
+  const completedVideos = generatedVideoVariants.filter(
+    (v) => v.status === 'complete'
+  );
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -82,7 +93,7 @@ function App() {
             Viral2Viral - UGC Video Cloner [POC]
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Recreate successful UGC ads for your product using AI
+            Recreate successful UGC ads for your product using AI (Google Veo)
           </p>
         </div>
       </header>
@@ -115,7 +126,11 @@ function App() {
                 className="ml-3 flex-shrink-0 text-red-400 hover:text-red-500"
               >
                 <span className="sr-only">Dismiss</span>
-                <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <svg
+                  className="h-5 w-5"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
                   <path
                     fillRule="evenodd"
                     d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
@@ -128,10 +143,7 @@ function App() {
         )}
 
         {/* Progress Indicator */}
-        <ProgressIndicator
-          currentStep={getStepIndex()}
-          steps={workflowSteps}
-        />
+        <ProgressIndicator currentStep={getStepIndex()} steps={workflowSteps} />
 
         {/* Workflow Steps */}
         <div className="space-y-6">
@@ -155,6 +167,7 @@ function App() {
               onSave={() => {
                 /* Move to next step */
               }}
+              structuredData={analysis?.structuredData}
             />
           )}
 
@@ -168,45 +181,47 @@ function App() {
             />
           )}
 
-          {/* Step 4: Prompt Generation */}
+          {/* Step 4: Prompt Variant Generation */}
           {currentStep === 'prompt-generation' && (
             <div className="space-y-6">
-              {!prompt && !isGeneratingPrompt && (
+              {promptVariants.length === 0 && !isGeneratingPromptVariants && (
                 <div className="bg-white rounded-lg shadow p-6">
                   <h2 className="text-2xl font-bold mb-4">
-                    Ready to Generate Prompt
+                    Ready to Generate Hook Variants
                   </h2>
                   <p className="text-gray-600 mb-6">
-                    Click the button below to generate a text-to-video prompt
-                    based on your video analysis and product information.
+                    Click the button below to generate several distinct hook
+                    angles - each broken into per-scene AI video prompts - based
+                    on your video analysis and product information.
                   </p>
                   <button
-                    onClick={generatePrompt}
+                    onClick={() => generatePromptVariants()}
                     className="w-full bg-blue-600 text-white px-4 py-3 rounded-md hover:bg-blue-700 transition-colors font-medium"
                   >
-                    Generate Prompt with AI
+                    Generate Hook Variants with AI
                   </button>
                 </div>
               )}
 
-              {isGeneratingPrompt && (
+              {isGeneratingPromptVariants && (
                 <div className="bg-white rounded-lg shadow p-6">
                   <div className="flex items-center justify-center space-x-3">
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                     <p className="text-gray-700">
-                      Creating a prompt for video generation using AI...
+                      Creating hook variants and per-scene prompts with AI...
                     </p>
                   </div>
                 </div>
               )}
 
-              {prompt && (
-                <PromptEditor
-                  prompt={prompt}
-                  onUpdate={updatePrompt}
-                  onApprove={approvePrompt}
-                  isUpdating={isUpdatingPrompt}
-                  isApproving={isApprovingPrompt}
+              {promptVariants.length > 0 && (
+                <PromptVariantsEditor
+                  variants={promptVariants}
+                  onUpdate={updatePromptVariant}
+                  onApprove={approvePromptVariant}
+                  updatingVariantIds={updatingVariantIds}
+                  approvingVariantIds={approvingVariantIds}
+                  onContinue={continueToVideoGeneration}
                 />
               )}
             </div>
@@ -215,14 +230,15 @@ function App() {
           {/* Step 5: Video Generation */}
           {currentStep === 'video-generation' && (
             <div className="space-y-6">
-              {/* Image Upload Section */}
+              {/* Optional Image Upload Section */}
               <div className="bg-white rounded-lg shadow p-6">
                 <h2 className="text-2xl font-bold mb-4">
-                  Upload Product Image
+                  Product Image (Optional)
                 </h2>
                 <p className="text-gray-600 mb-6">
-                  Upload an image of your product to be used as reference for
-                  the video generation.
+                  Optionally upload a product image to anchor the opening
+                  scene's appearance. Veo can also generate great results from
+                  the text prompts alone.
                 </p>
                 <ImageUpload
                   onImageSelect={selectProductImage}
@@ -238,49 +254,43 @@ function App() {
                 />
               </div>
 
-              {/* Generate Video Button */}
-              {imageUploadProgress === 100 && !isGeneratingVideo && !generatedVideo && (
+              {/* Generate Videos Button */}
+              {!isGeneratingVideos && generatedVideoVariants.length === 0 && (
                 <div className="bg-white rounded-lg shadow p-6">
                   <h2 className="text-2xl font-bold mb-4">
-                    Ready to Generate Video
+                    Ready to Generate {approvedVariantCount} Video
+                    {approvedVariantCount !== 1 ? 's' : ''}
                   </h2>
                   <p className="text-gray-600 mb-6">
-                    Your prompt is approved and product image is uploaded.
-                    Click below to start generating your advertisement video
-                    using Sora 2 AI.
+                    Each approved hook variant will be rendered scene-by-scene
+                    with Google Veo and stitched into a fast-paced vertical
+                    video.
                   </p>
                   <button
-                    onClick={startGenerateVideo}
+                    onClick={generateVideos}
                     className="w-full bg-green-600 text-white px-4 py-3 rounded-md hover:bg-green-700 transition-colors font-medium"
                   >
-                    Generate Advertisement Video
+                    Generate Advertisement Videos
                   </button>
                 </div>
               )}
 
               {/* Video Generation Progress */}
-              {isGeneratingVideo && generatedVideo && (
-                <div className="bg-white rounded-lg shadow p-6">
-                  <h2 className="text-2xl font-bold mb-4">
-                    Generating Your Video
-                  </h2>
-                  <div className="space-y-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600"></div>
-                      <div className="flex-1">
-                        <p className="text-gray-700 font-medium">
-                          Video generation in progress...
-                        </p>
-                        <p className="text-sm text-gray-500">
-                          Status: {generatedVideo.status}
-                        </p>
-                      </div>
-                    </div>
+              {generatedVideoVariants.length > 0 && (
+                <div className="space-y-4">
+                  {isGeneratingVideos && (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                       <p className="text-sm text-blue-800">
-                        This may take 3-5 minutes. Please don't close this page.
+                        Rendering scene clips with Veo and stitching them
+                        together. This can take several minutes per variant -
+                        please don't close this page.
                       </p>
                     </div>
+                  )}
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                    {generatedVideoVariants.map((video) => (
+                      <GeneratedVideoCard key={video.variantId} video={video} />
+                    ))}
                   </div>
                 </div>
               )}
@@ -288,43 +298,41 @@ function App() {
           )}
 
           {/* Step 6: Complete - Show Videos Side by Side */}
-          {currentStep === 'complete' && generatedVideo?.downloadUrl && (
+          {currentStep === 'complete' && completedVideos.length > 0 && (
             <div className="space-y-6">
               <div className="bg-white rounded-lg shadow p-6">
                 <h2 className="text-2xl font-bold mb-2 text-green-600">
                   ✨ Video Generation Complete!
                 </h2>
                 <p className="text-gray-600 mb-6">
-                  Your advertisement video has been successfully generated.
-                  Compare it with the original video below.
+                  {completedVideos.length} advertisement video
+                  {completedVideos.length !== 1 ? 's have' : ' has'} been
+                  successfully generated. Compare them with the original video
+                  below.
                 </p>
               </div>
 
-              {/* Side-by-Side Video Comparison */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Original Video */}
-                {originalVideoUrl && (
+              {/* Original video for reference */}
+              {originalVideoUrl && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <VideoPlayer
                     videoUrl={originalVideoUrl}
                     title="Original UGC Video"
                     className="bg-white rounded-lg shadow p-6"
                   />
-                )}
+                </div>
+              )}
 
-                {/* Generated Video */}
-                <VideoPlayer
-                  videoUrl={generatedVideo.downloadUrl}
-                  title="Generated Advertisement"
-                  downloadUrl={generatedVideo.downloadUrl}
-                  className="bg-white rounded-lg shadow p-6"
-                />
+              {/* Generated Video Variants */}
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {generatedVideoVariants.map((video) => (
+                  <GeneratedVideoCard key={video.variantId} video={video} />
+                ))}
               </div>
 
               {/* Success Actions */}
               <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-lg font-semibold mb-4">
-                  What's Next?
-                </h3>
+                <h3 className="text-lg font-semibold mb-4">What's Next?</h3>
                 <div className="space-y-3">
                   <button
                     onClick={() => window.location.reload()}
@@ -336,8 +344,6 @@ function App() {
               </div>
             </div>
           )}
-
-          {/* Future steps will be added here */}
         </div>
       </main>
 

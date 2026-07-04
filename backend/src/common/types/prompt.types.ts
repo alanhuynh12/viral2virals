@@ -2,7 +2,13 @@
  * Prompt Types
  *
  * Defines text-to-video prompt structures and moderation status.
+ * Prompts are generated in batches of "variants" - each variant tries a
+ * different hook/angle and carries its own per-scene Veo prompts so a
+ * fast-paced multi-cut video can be assembled scene-by-scene instead of
+ * a single monolithic generation call.
  */
+
+import { HookType } from './analysis.types';
 
 /**
  * Content moderation status
@@ -15,20 +21,47 @@ export enum ModerationStatus {
 }
 
 /**
- * GenerationPrompt represents the text-to-video prompt for Sora 2
+ * A single scene's Veo-ready text prompt.
  */
-export interface GenerationPrompt {
+export interface ScenePrompt {
+  /** Zero-based index matching the source Scene */
+  sceneIndex: number;
+
+  /** Scene purpose label (hook/problem/solution/benefit/cta) */
+  purpose: string;
+
+  /** Target clip duration in seconds - will be snapped to a Veo-supported value (4, 6, or 8) */
+  durationSeconds: number;
+
+  /** Full Veo text prompt for this scene (subject, action, style, camera, dialogue in quotes, SFX) */
+  text: string;
+}
+
+/**
+ * GenerationPromptVariant represents one candidate creative direction
+ * (hook + full set of per-scene prompts) for the new advertisement video.
+ */
+export interface GenerationPromptVariant {
   /** Unique identifier (UUID) */
-  promptId: string;
+  variantId: string;
 
-  /** AI-generated prompt text */
-  generatedText: string;
+  /** Short human-readable label, e.g. "Bold Claim Hook" */
+  hookLabel: string;
 
-  /** User's edited version (if modified, optional) */
-  userEditedText?: string;
+  /** Hook archetype used for this variant */
+  hookType: HookType;
+
+  /** Per-scene Veo prompts that make up this variant, in order */
+  scenePrompts: ScenePrompt[];
+
+  /** AI-generated pretty-printed JSON view of scenePrompts (editable by user) */
+  summaryText: string;
+
+  /** User's edited version of summaryText (if modified, optional) */
+  userEditedSummaryText?: string;
 
   /** Final approved text (generated or edited) */
-  finalText: string;
+  finalSummaryText: string;
 
   /** Character count of final text */
   characterCount: number;

@@ -7,8 +7,8 @@
 import { OriginalVideo } from './video.types';
 import { VideoAnalysis } from './analysis.types';
 import { ProductInformation } from './product.types';
-import { GenerationPrompt } from './prompt.types';
-import { GeneratedVideo } from './generation.types';
+import { GenerationPromptVariant } from './prompt.types';
+import { GeneratedVideoVariant } from './generation.types';
 
 /**
  * Session status enum representing workflow progression
@@ -51,9 +51,9 @@ export interface Session {
   /** User's product details (optional until submitted) */
   productInformation?: ProductInformation;
 
-  /** Text-to-video prompt (optional until generated) */
-  generationPrompt?: GenerationPrompt;
+  /** Batch of candidate hook/prompt variants (optional until generated) */
+  promptVariants?: GenerationPromptVariant[];
 
-  /** Final output video (optional until generated) */
-  generatedVideo?: GeneratedVideo;
+  /** Batch of generated advertisement videos, one per approved variant */
+  generatedVideoVariants?: GeneratedVideoVariant[];
 }

@@ -3,8 +3,10 @@
 ## Prerequisites
 
 - Node.js v20+
+- `ffmpeg` installed and on `PATH` (used to stitch AI-generated scene clips together)
 - AWS S3 bucket with CORS enabled
-- Google Gemini API key
+- Google Gemini API key (also used for Veo video generation)
+- Laozhang API key (for GPT-5 prompt text generation)
 
 ## Quick Start
 
@@ -27,13 +29,21 @@ AWS_SECRET_ACCESS_KEY=your_actual_aws_secret_key_here
 AWS_S3_BUCKET=your_s3_bucket_name_here
 
 # Google Gemini - REQUIRED - Get from https://makersuite.google.com/app/apikey
+# Also used for Veo video generation (Veo is served through the same Gemini API)
 GOOGLE_GEMINI_API_KEY=your_actual_gemini_api_key_here
+VEO_MODEL=veo-3.1-fast-generate-preview
+VEO_ASPECT_RATIO=9:16
+VEO_RESOLUTION=720p
+
+# Laozhang - REQUIRED for prompt variant generation (GPT-5)
+LAOZHANG_API_KEY=your_laozhang_api_key
 
 # CORS
 CORS_ORIGIN=http://localhost:5173
 
-# Optional for now (needed for Phase 3+)
-# LAOZHANG_API_KEY=your_laozhang_api_key
+# Optional: skip real (billed) AI calls during local development
+# MOCK_ANALYSIS=true
+# MOCK_VIDEO_GENERATION=true
 ```
 
 **Frontend** (`frontend/.env`):
@@ -81,14 +91,16 @@ The frontend will start on **http://localhost:5173**
 7. After 30-60 seconds, you'll see the scene breakdown
 8. You can edit the analysis by clicking "Edit"
 
-## What's Working (Phase 3 - User Story 1)
+## What's Working
 
 ✅ Video file upload with validation
 ✅ Direct browser-to-S3 upload via presigned URLs
-✅ Google Gemini AI video analysis
-✅ Scene-by-scene breakdown display
-✅ Inline editing of analysis results
-✅ Progress indicator
+✅ Google Gemini AI structured video analysis (hooks, per-scene pacing/cuts, captions)
+✅ Scene-by-scene breakdown display with editable JSON
+✅ Batch hook/prompt variant generation (GPT-5) with per-scene Veo prompts
+✅ Multi-clip video generation with Google Veo 3/3.1 + `ffmpeg` stitching
+✅ Batch generation and side-by-side comparison of multiple video variants
+✅ Progress indicators (including per-scene render status)
 ✅ Error handling
 
 ## Troubleshooting
@@ -107,6 +119,12 @@ The frontend will start on **http://localhost:5173**
 - Check Google Gemini API key is valid
 - Verify video uploaded successfully to S3
 - Check backend console for error messages
+
+### Video generation fails or times out
+- Check that `ffmpeg` is installed and available on `PATH` (`ffmpeg -version`)
+- Verify the Gemini/Veo API key has access to the configured `VEO_MODEL`
+- Check backend console for per-scene error messages
+- Try `MOCK_VIDEO_GENERATION=true` locally to confirm the stitching pipeline itself works
 
 ## S3 CORS Configuration
 
@@ -129,13 +147,14 @@ Your S3 bucket needs this CORS policy:
 - `POST /api/sessions/:sessionId/analysis` - Trigger video analysis
 - `GET /api/sessions/:sessionId/analysis` - Get analysis status/results
 - `PATCH /api/sessions/:sessionId/analysis` - Update analysis with edits
-
-## Next Steps
-
-After testing Phase 3 (User Story 1), you can continue with:
-- Phase 4: User Story 2 - Product Information Input
-- Phase 5: User Story 3 - Prompt Generation and Moderation
-- Phase 6: User Story 4 - Advertisement Video Generation
+- `POST /api/sessions/:sessionId/product` - Submit product info
+- `POST /api/sessions/:sessionId/product/image/upload` - Upload product image
+- `POST /api/sessions/:sessionId/prompt/variants` - Generate a batch of hook/prompt variants
+- `GET /api/sessions/:sessionId/prompt/variants` - Get current prompt variants
+- `PATCH /api/sessions/:sessionId/prompt/variants/:variantId` - Edit a single variant
+- `POST /api/sessions/:sessionId/prompt/variants/:variantId/approve` - Approve a variant
+- `POST /api/sessions/:sessionId/generate` - Batch-generate videos for all approved variants
+- `GET /api/sessions/:sessionId/generate` - Poll status of all generated video variants
 
 ## Development Commands
 

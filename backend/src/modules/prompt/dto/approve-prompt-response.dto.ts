@@ -1,17 +1,17 @@
 /**
  * Approve Prompt Response DTO
  *
- * Response for prompt approval endpoint
+ * Response for prompt variant approval endpoint
  */
 
-import { GenerationPrompt } from '../../../common/types/prompt.types';
+import { GenerationPromptVariant } from '../../../common/types/prompt.types';
 
 /**
- * Response for POST /sessions/:sessionId/prompt/approve
+ * Response for POST /sessions/:sessionId/prompt/variants/:variantId/approve
  */
 export interface ApprovePromptResponseDto {
   success: boolean;
-  data: GenerationPrompt;
+  data: GenerationPromptVariant;
   meta: {
     timestamp: string;
     requestId: string;

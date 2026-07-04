@@ -1,17 +1,17 @@
 /**
  * Update Prompt Response DTO
  *
- * Response for prompt update endpoint
+ * Response for prompt variant update endpoint
  */
 
-import { GenerationPrompt } from '../../../common/types/prompt.types';
+import { GenerationPromptVariant } from '../../../common/types/prompt.types';
 
 /**
- * Response for PATCH /sessions/:sessionId/prompt
+ * Response for PATCH /sessions/:sessionId/prompt/variants/:variantId
  */
 export interface UpdatePromptResponseDto {
   success: boolean;
-  data: GenerationPrompt;
+  data: GenerationPromptVariant;
   meta: {
     timestamp: string;
     requestId: string;

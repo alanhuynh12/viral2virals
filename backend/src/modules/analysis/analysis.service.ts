@@ -7,7 +7,90 @@ import {
   AnalysisStatus,
 } from '../../common/types/analysis.types';
 import { SessionStatus } from '../../common/types/session.types';
+import { loadConfiguration } from '../../config/configuration';
+import { parseSceneAnalysis } from '../../common/utils/scene-analysis.util';
 import { v4 as uuidv4 } from 'uuid';
+
+/**
+ * The JSON schema we ask Gemini to fill in. Compared to a plain prose
+ * breakdown, this captures the specific signals needed to recreate a
+ * fast-paced, TikTok/Reels-style UGC ad scene-by-scene: an explicit hook
+ * classification, per-scene cut/caption timing, and objective pacing
+ * metrics (cut count, average shot length) instead of vague adjectives.
+ */
+const ANALYSIS_PROMPT = `You are analyzing a short-form UGC (user-generated content) advertisement video so it can be recreated scene-by-scene as a fast-paced, TikTok/Instagram-Reels-style ad using AI video generation tools.
+
+Focus ONLY on the most impactful, engaging moments. Ignore filler, transitions, credits, or non-essential content. Prioritize the opening hook, pattern interrupts, visual impact, on-screen captions, and message clarity - the things that actually drive watch-through and virality on short-form platforms.
+
+Break the video into 3-6 scenes covering: the hook (first 1-3s), problem/relatable setup, solution/product reveal, benefit/proof, and call-to-action. Not every video has all of these - only include scenes that are actually present.
+
+Respond with ONLY a valid JSON object (no markdown fences, no commentary) matching exactly this shape:
+{
+  "scenes": [
+    {
+      "sceneIndex": 0,
+      "timestamp": "0:00-0:02",
+      "startTimeSeconds": 0,
+      "duration": 2,
+      "purpose": "hook | problem | solution | benefit | cta",
+      "hookType": "pattern_interrupt | bold_claim | question | relatable_problem | visual_shock | social_proof | other (only set for the hook scene, omit otherwise)",
+      "visualDetails": {
+        "cameraAngle": "framing and any dolly/pan/zoom",
+        "movement": "subject positioning and action",
+        "lighting": "color temperature, intensity, shadows, mood",
+        "colorPalette": "primary colors, grading, emotional tone",
+        "onScreenElements": "props, graphics, logos visible (not captions - captions go in the captions array)"
+      },
+      "cinematicDetails": {
+        "shotType": "wide | medium | close-up | detail shot",
+        "pacing": "speed of action, cut timing description",
+        "style": "documentary | cinematic | testimonial | product demo | etc.",
+        "cutCount": 1
+      },
+      "audioDetails": {
+        "dialogue": "exact words spoken, tone, emotional delivery",
+        "soundDesign": "music genre/energy, ambient sounds, sound effects",
+        "timing": "when sounds/beats occur relative to visuals"
+      },
+      "captions": [
+        {
+          "text": "exact on-screen caption/text-overlay copy",
+          "position": "top | center | bottom",
+          "style": "font weight, color, animation, emphasis",
+          "startTime": 0,
+          "endTime": 2
+        }
+      ]
+    }
+  ],
+  "hook": {
+    "type": "pattern_interrupt | bold_claim | question | relatable_problem | visual_shock | social_proof | other",
+    "text": "the exact hook line (spoken or on-screen)",
+    "durationSeconds": 2
+  },
+  "overallAesthetic": "one sentence describing the overall visual identity",
+  "dominantColors": ["color1", "color2"],
+  "pacing": "one sentence describing the overall rhythm",
+  "audioStyle": "one sentence describing the overall audio identity",
+  "musicStyle": "genre/energy of the background music, for sourcing a replacement track",
+  "captionStyle": {
+    "fontFamily": "sans-serif | serif | handwritten | etc.",
+    "textColor": "dominant caption text color",
+    "backgroundStyle": "e.g. semi-transparent black box, none, highlighted word-by-word",
+    "position": "top | center | bottom",
+    "animation": "e.g. pop-in per word, fade, none"
+  },
+  "recommendedAspectRatio": "9:16",
+  "totalDurationSeconds": 8,
+  "cutCount": 4,
+  "averageShotDurationSeconds": 2
+}
+
+IMPORTANT REQUIREMENTS:
+- Maintain the original video's core message and visual identity.
+- Optimize for maximum virality: emotional impact, pattern interrupts, clarity, and urgency.
+- cutCount and averageShotDurationSeconds must be objective counts/averages derived from the scenes you identified, not vague descriptions.
+- Respond with ONLY the JSON object described above, without any additional explanation or text outside the JSON object.`;
 
 /**
  * AnalysisService
@@ -18,20 +101,26 @@ import { v4 as uuidv4 } from 'uuid';
  */
 @Injectable()
 export class AnalysisService {
-  private readonly genai: GoogleGenAI;
+  private readonly genai: GoogleGenAI | undefined;
+  private readonly mock: boolean;
+  private readonly model: string;
 
   constructor(
     private readonly s3Service: S3Service,
     private readonly sessionService: SessionService,
   ) {
-    const apiKey =
-      process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        'GOOGLE_GEMINI_API_KEY or GEMINI_API_KEY environment variable is required',
-      );
+    const config = loadConfiguration();
+    this.mock = config.gemini.mock;
+    this.model = config.gemini.model;
+
+    if (!this.mock) {
+      if (!config.gemini.apiKey) {
+        throw new Error(
+          'GOOGLE_GEMINI_API_KEY or GEMINI_API_KEY environment variable is required',
+        );
+      }
+      this.genai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
     }
-    this.genai = new GoogleGenAI({});
   }
 
   /**
@@ -105,185 +194,67 @@ export class AnalysisService {
     console.log('[AnalysisService] S3 Key:', s3Key);
 
     try {
-      // Download video from S3
-      console.log('[AnalysisService] Downloading video from S3...');
-      const videoBuffer = await this.s3Service.downloadBuffer(s3Key);
-      console.log(
-        '[AnalysisService] Video downloaded, size:',
-        videoBuffer.length,
-        'bytes',
-      );
+      let responseText: string;
 
-      // Convert to base64
-      console.log('[AnalysisService] Converting to base64...');
-      const videoBase64 = videoBuffer.toString('base64');
-      console.log('[AnalysisService] Base64 length:', videoBase64.length);
+      if (this.mock) {
+        console.log(
+          '[AnalysisService] MOCK_ANALYSIS enabled, skipping Gemini call',
+        );
+        responseText = this.buildMockAnalysisResponse();
+      } else {
+        console.log('[AnalysisService] Downloading video from S3...');
+        const videoBuffer = await this.s3Service.downloadBuffer(s3Key);
+        console.log(
+          '[AnalysisService] Video downloaded, size:',
+          videoBuffer.length,
+          'bytes',
+        );
 
-      // Get Gemini model
-      const prompt = `You are analyzing a video to extract key scenes for recreating an 8-second viral video using AI video generation tools.
-Focus ONLY on the most impactful, engaging moments. Ignore filler, transitions, credits, or non-essential content. Prioritize intensity, visual impact, and message clarity.
+        const videoBase64 = videoBuffer.toString('base64');
 
-You must respond with a valid JSON object with a single key "sceneBreakdown" containing the scene breakdown, like so:
-{
-  "sceneBreakdown": ""
-}
-
-For each scene, provide:
-SCENE BREAKDOWN:
-[Timestamp from original video]
-Duration: [seconds needed in 8-sec format]
-Scene Purpose: [Hook/Problem/Solution/CTA]
-Visual Details:
-Camera angle and movement: [specific framing and any dolly, pan, or zoom]
-Subject positioning and action: [what's happening, who/what is visible, direction of movement]
-Lighting: [dominant color temperature, intensity, shadows, mood]
-Color palette: [primary colors, grading, emotional tone]
-On-screen elements: [text, graphics, overlays, props visible]
-Visual effects or transitions: [any special effects, cuts, or stylistic elements]
-Cinematic Details:
-Shot type: [wide, medium, close-up, detail shot]
-Pacing/rhythm: [speed of action, cut timing]
-Style and aesthetic: [documentary, cinematic, animated, product demo, etc.]
-Audio Details:
-Dialogue/voiceover: [exact words if present, tone, emotional delivery]
-Sound design: [music genre, ambient sounds, sound effects, music intensity]
-Timing: [when sounds occur relative to visuals]
-
-IMPORTANT REQUIREMENTS:
-Maintain the original video's core message and visual identity.
-Optimize for maximum virality: emotional impact, pattern interrupts, clarity, and urgency.
-Respond with a valid JSON with 1 key "sceneBreakdown", without any additional explanation or text outside the JSON object.`;
-
-      // Send request to Gemini
-      console.log('[AnalysisService] Sending request to Gemini API...');
-
-      // DEVELOPMENT MODE: Using hardcoded response to avoid expensive API calls
-      // TODO: Remove this when ready for production
-      // const response = {
-      //   sdkHttpResponse: {
-      //     headers: {
-      //       'alt-svc': 'h3=":443"; ma=2592000,h3-29=":443"; ma=2592000',
-      //       'content-encoding': 'gzip',
-      //       'content-type': 'application/json; charset=UTF-8',
-      //       date: 'Mon, 24 Nov 2025 16:23:59 GMT',
-      //       server: 'scaffolding on HTTPServer2',
-      //       'server-timing': 'gfet4t7; dur=25710',
-      //       'transfer-encoding': 'chunked',
-      //       vary: 'Origin, X-Origin, Referer',
-      //       'x-content-type-options': 'nosniff',
-      //       'x-frame-options': 'SAMEORIGIN',
-      //       'x-xss-protection': '0',
-      //     },
-      //   },
-      //   candidates: [
-      //     {
-      //       content: {
-      //         parts: [
-      //           {
-      //             text: '```json\n{\n  "sceneBreakdown": [\n    {\n      "Timestamp from original video": "0:00",\n      "Duration": "1.5s",\n      "Scene Purpose": "Hook",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, slight upward pan from the shipping box to the AG1 pouch.",\n        "Subject positioning and action": "A hand (wearing rings) is gently holding a large green AG1 pouch, which is nestled in a custom-fit green cardboard box.",\n        "Lighting": "Bright, even, appearing like natural daylight. Soft shadows give depth.",\n        "Color palette": "Dominant deep greens (pouch, box), crisp white text on the pouch, warm skin tones.",\n        "On-screen elements": "Large \'AG1\' logo, \'Comprehensive + Convenient Daily Nutrition\', and certification badges on the pouch. Text overlay: \'Free Year Supply of Vitamin D & 5 Free Travel Packs\'.",\n        "Visual effects or transitions": "None."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up.",\n        "Pacing/rhythm": "Smooth, steady, introductory.",\n        "Style and aesthetic": "Product unboxing/reveal, clean, direct."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'Remembering to take all of my supplements is a lot sometimes.\' (Female voice, relatable, slightly hurried tone).",\n        "Sound design": "Upbeat, modern, corporate-friendly background music, medium intensity.",\n        "Timing": "Dialogue begins immediately with the visual."\n      }\n    },\n    {\n      "Timestamp from original video": "0:03.5",\n      "Duration": "2s",\n      "Scene Purpose": "Solution",\n      "Visual Details": {\n        "Camera angle and movement": "Medium shot, static, directly facing the woman. Quick cut to a close-up of a hand scooping green powder.",\n        "Subject positioning and action": "A smiling woman with long brown hair, wearing a white t-shirt, holds a clear bottle of green liquid (mixed AG1). Her body is slightly angled, looking at the camera. Then, a hand uses a green scoop to retrieve light green powder from a metallic-looking container.",\n        "Lighting": "Bright, even, consistent lighting. The woman is against a bright, minimalist background. The powder shot has warm kitchen lighting.",\n        "Color palette": "Vibrant greens (drink, powder), crisp white (woman\'s shirt), warm skin tones, light neutral backgrounds.",\n        "On-screen elements": "AG1 logo faintly visible on the bottle. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "Hard cut between the woman and the powder scoop."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium shot, then detail shot.",\n        "Pacing/rhythm": "Quick and informative cuts.",\n        "Style and aesthetic": "Lifestyle, product demonstration, energetic."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'And this is so much more than just a greens powder. It\'s got all of your vitamins, minerals, probiotics and more.\' (Female voice, enthusiastic, clear articulation).",\n        "Sound design": "Background music continues, steady intensity. Subtle \'scooping\' sound effect.",\n        "Timing": "Dialogue starts with the woman\'s shot and continues over the scoop shot."\n      }\n    },\n    {\n      "Timestamp from original video": "0:13",\n      "Duration": "2s",\n      "Scene Purpose": "Benefits",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, static, man directly facing the camera.",\n        "Subject positioning and action": "A bearded man with glasses and a cap, wearing a blue hoodie over a green shirt, holds an AG1 pouch and gestures with his free hand, expressing excitement.",\n        "Lighting": "Bright, soft, even lighting. Some subtle shadows on the white patterned background add dimension.",\n        "Color palette": "Dominant green (pouch, shirt), blue (hoodie), warm skin tones, clean white background.",\n        "On-screen elements": "AG1 pouch. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "None."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up.",\n        "Pacing/rhythm": "Dynamic and engaging, driven by the speaker\'s energy.",\n        "Style and aesthetic": "Testimonial, authentic, friendly."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'my immune system, my gut health, and energy. And I\'ve also noticed a huge difference in my hair and nails.\' (Male voice, enthusiastic, confident tone).",\n        "Sound design": "Background music continues, slightly increasing in energy.",\n        "Timing": "Dialogue begins immediately and is delivered expressively."\n      }\n    },\n    {\n      "Timestamp from original video": "0:28",\n      "Duration": "2.5s",\n      "Scene Purpose": "CTA",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, static, man facing camera. Quick cut to a close-up overhead shot.",\n        "Subject positioning and action": "The same man holds up a small, dark green dropper bottle (liquid Vitamin D), smiling at the camera. Then, five small green AG1 travel packs are neatly spread on a warm-toned wooden surface next to an AG1 container.",\n        "Lighting": "Bright, even, highlighting product details. The wooden surface has a slightly warmer, inviting feel.",\n        "Color palette": "Rich greens (bottle, packs, container), dark brown (wooden surface), crisp white text on products, warm skin tones.",\n        "On-screen elements": "Small \'D3+K2\' text on the dropper bottle. \'AG1\' logo and product details on travel packs. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "Hard cut between the man and the close-up of the packs."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up, then detail shot.",\n        "Pacing/rhythm": "Fast cuts to emphasize the bundled offer.",\n        "Style and aesthetic": "Promotional, clear call to action, value-oriented."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'If you order Athletic Greens right now, you\'ll receive this year supply of this liquid Vitamin D and five free travel packs.\' (Male voice, urgent, persuasive tone).",\n        "Sound design": "Background music builds to a final flourish, ending with the dialogue.",\n        "Timing": "Dialogue starts with the man\'s shot and continues over the product close-up, concluding the video."\n      }\n    }\n  ]\n}\n```',
-      //           },
-      //         ],
-      //         role: 'model',
-      //       },
-      //       finishReason: 'STOP',
-      //       index: 0,
-      //     },
-      //   ],
-      //   modelVersion: 'gemini-2.5-flash',
-      //   responseId: 'n4YkaYyLKNCOvdIPkJWQ6AM',
-      //   usageMetadata: {
-      //     promptTokenCount: 11304,
-      //     candidatesTokenCount: 1587,
-      //     totalTokenCount: 15994,
-      //     promptTokensDetails: [
-      //       { modality: 'TEXT', tokenCount: 412 },
-      //       { modality: 'VIDEO', tokenCount: 9731 },
-      //       { modality: 'AUDIO', tokenCount: 1161 },
-      //     ],
-      //     thoughtsTokenCount: 3103,
-      //   },
-      //   text: '```json\n{\n  "sceneBreakdown": [\n    {\n      "Timestamp from original video": "0:00",\n      "Duration": "1.5s",\n      "Scene Purpose": "Hook",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, slight upward pan from the shipping box to the AG1 pouch.",\n        "Subject positioning and action": "A hand (wearing rings) is gently holding a large green AG1 pouch, which is nestled in a custom-fit green cardboard box.",\n        "Lighting": "Bright, even, appearing like natural daylight. Soft shadows give depth.",\n        "Color palette": "Dominant deep greens (pouch, box), crisp white text on the pouch, warm skin tones.",\n        "On-screen elements": "Large \'AG1\' logo, \'Comprehensive + Convenient Daily Nutrition\', and certification badges on the pouch. Text overlay: \'Free Year Supply of Vitamin D & 5 Free Travel Packs\'.",\n        "Visual effects or transitions": "None."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up.",\n        "Pacing/rhythm": "Smooth, steady, introductory.",\n        "Style and aesthetic": "Product unboxing/reveal, clean, direct."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'Remembering to take all of my supplements is a lot sometimes.\' (Female voice, relatable, slightly hurried tone).",\n        "Sound design": "Upbeat, modern, corporate-friendly background music, medium intensity.",\n        "Timing": "Dialogue begins immediately with the visual."\n      }\n    },\n    {\n      "Timestamp from original video": "0:03.5",\n      "Duration": "2s",\n      "Scene Purpose": "Solution",\n      "Visual Details": {\n        "Camera angle and movement": "Medium shot, static, directly facing the woman. Quick cut to a close-up of a hand scooping green powder.",\n        "Subject positioning and action": "A smiling woman with long brown hair, wearing a white t-shirt, holds a clear bottle of green liquid (mixed AG1). Her body is slightly angled, looking at the camera. Then, a hand uses a green scoop to retrieve light green powder from a metallic-looking container.",\n        "Lighting": "Bright, even, consistent lighting. The woman is against a bright, minimalist background. The powder shot has warm kitchen lighting.",\n        "Color palette": "Vibrant greens (drink, powder), crisp white (woman\'s shirt), warm skin tones, light neutral backgrounds.",\n        "On-screen elements": "AG1 logo faintly visible on the bottle. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "Hard cut between the woman and the powder scoop."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium shot, then detail shot.",\n        "Pacing/rhythm": "Quick and informative cuts.",\n        "Style and aesthetic": "Lifestyle, product demonstration, energetic."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'And this is so much more than just a greens powder. It\'s got all of your vitamins, minerals, probiotics and more.\' (Female voice, enthusiastic, clear articulation).",\n        "Sound design": "Background music continues, steady intensity. Subtle \'scooping\' sound effect.",\n        "Timing": "Dialogue starts with the woman\'s shot and continues over the scoop shot."\n      }\n    },\n    {\n      "Timestamp from original video": "0:13",\n      "Duration": "2s",\n      "Scene Purpose": "Benefits",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, static, man directly facing the camera.",\n        "Subject positioning and action": "A bearded man with glasses and a cap, wearing a blue hoodie over a green shirt, holds an AG1 pouch and gestures with his free hand, expressing excitement.",\n        "Lighting": "Bright, soft, even lighting. Some subtle shadows on the white patterned background add dimension.",\n        "Color palette": "Dominant green (pouch, shirt), blue (hoodie), warm skin tones, clean white background.",\n        "On-screen elements": "AG1 pouch. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "None."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up.",\n        "Pacing/rhythm": "Dynamic and engaging, driven by the speaker\'s energy.",\n        "Style and aesthetic": "Testimonial, authentic, friendly."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'my immune system, my gut health, and energy. And I\'ve also noticed a huge difference in my hair and nails.\' (Male voice, enthusiastic, confident tone).",\n        "Sound design": "Background music continues, slightly increasing in energy.",\n        "Timing": "Dialogue begins immediately and is delivered expressively."\n      }\n    },\n    {\n      "Timestamp from original video": "0:28",\n      "Duration": "2.5s",\n      "Scene Purpose": "CTA",\n      "Visual Details": {\n        "Camera angle and movement": "Medium close-up, static, man facing camera. Quick cut to a close-up overhead shot.",\n        "Subject positioning and action": "The same man holds up a small, dark green dropper bottle (liquid Vitamin D), smiling at the camera. Then, five small green AG1 travel packs are neatly spread on a warm-toned wooden surface next to an AG1 container.",\n        "Lighting": "Bright, even, highlighting product details. The wooden surface has a slightly warmer, inviting feel.",\n        "Color palette": "Rich greens (bottle, packs, container), dark brown (wooden surface), crisp white text on products, warm skin tones.",\n        "On-screen elements": "Small \'D3+K2\' text on the dropper bottle. \'AG1\' logo and product details on travel packs. Text overlay \'Free Year Supply of Vitamin D & 5 Free Travel Packs\' remains.",\n        "Visual effects or transitions": "Hard cut between the man and the close-up of the packs."\n      },\n      "Cinematic Details": {\n        "Shot type": "Medium close-up, then detail shot.",\n        "Pacing/rhythm": "Fast cuts to emphasize the bundled offer.",\n        "Style and aesthetic": "Promotional, clear call to action, value-oriented."\n      },\n      "Audio Details": {\n        "Dialogue/voiceover": "\'If you order Athletic Greens right now, you\'ll receive this year supply of this liquid Vitamin D and five free travel packs.\' (Male voice, urgent, persuasive tone).",\n        "Sound design": "Background music builds to a final flourish, ending with the dialogue.",\n        "Timing": "Dialogue starts with the man\'s shot and continues over the product close-up, concluding the video."\n      }\n    }\n  ]\n}\n```',
-      // };
-
-      // PRODUCTION: Uncomment this to use real Gemini API
-      const response = await this.genai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [
-          {
-            inlineData: {
-              mimeType: 'video/mp4',
-              data: videoBase64,
+        console.log('[AnalysisService] Sending request to Gemini API...');
+        const response = await this.genai!.models.generateContent({
+          model: this.model,
+          contents: [
+            {
+              inlineData: {
+                mimeType: 'video/mp4',
+                data: videoBase64,
+              },
             },
-          },
-          { text: prompt },
-        ],
-      });
+            { text: ANALYSIS_PROMPT },
+          ],
+        });
 
-      console.log('[AnalysisService] Received response from Gemini');
-      console.log('[AnalysisService] Response:', JSON.stringify(response));
-      console.log('[AnalysisService] Response Raw:', response);
-
-      let sceneBreakdown = '';
-      try {
-        const responseText = response?.text || '';
-        console.log(
-          '[AnalysisService] Raw response length:',
-          responseText.length,
-        );
-        console.log(
-          '[AnalysisService] Raw response preview:',
-          responseText.substring(0, 200),
-        );
-
-        // Try to parse JSON response - remove markdown code blocks if present
-        const cleanedText = responseText
-          .replace(/```json\n?|```\n?/g, '')
-          .trim();
-        const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
-
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          // Handle both array and string formats
-          if (Array.isArray(parsed.sceneBreakdown)) {
-            sceneBreakdown = JSON.stringify(parsed.sceneBreakdown, null, 2);
-            console.log(
-              '[AnalysisService] Extracted sceneBreakdown array, items:',
-              parsed.sceneBreakdown.length,
-            );
-          } else if (typeof parsed.sceneBreakdown === 'string') {
-            sceneBreakdown = parsed.sceneBreakdown;
-            console.log(
-              '[AnalysisService] Extracted sceneBreakdown string, length:',
-              sceneBreakdown.length,
-            );
-          } else {
-            sceneBreakdown = cleanedText;
-            console.log(
-              '[AnalysisService] Using full cleaned text as sceneBreakdown',
-            );
-          }
-        } else {
-          // Fallback to full text if not JSON
-          sceneBreakdown = responseText;
-          console.log(
-            '[AnalysisService] Using full response text as sceneBreakdown',
-          );
-        }
-      } catch (parseError) {
-        console.error(
-          '[AnalysisService] Error parsing JSON response:',
-          parseError,
-        );
-        sceneBreakdown = response?.text || '';
+        console.log('[AnalysisService] Received response from Gemini');
+        responseText = response?.text || '';
       }
+
       console.log(
-        '[AnalysisService] Final scene breakdown length:',
-        sceneBreakdown.length,
+        '[AnalysisService] Raw response length:',
+        responseText.length,
       );
-      console.log(
-        '[AnalysisService] Final scene breakdown:',
-        JSON.stringify(sceneBreakdown),
-      );
+
+      const structuredData = parseSceneAnalysis(responseText);
+
+      // The editable text shown to the user is the pretty-printed JSON so
+      // that any edits they make can be re-parsed back into structured data.
+      const sceneBreakdown = structuredData
+        ? JSON.stringify(structuredData, null, 2)
+        : responseText;
+
+      if (!structuredData) {
+        console.warn(
+          '[AnalysisService] Could not parse structured scenes from Gemini response, storing raw text only',
+        );
+      } else {
+        console.log(
+          '[AnalysisService] Parsed structured analysis with',
+          structuredData.scenes.length,
+          'scenes, cutCount:',
+          structuredData.cutCount,
+        );
+      }
 
       // Update session with complete analysis
       const session = this.sessionService.getSession(sessionId);
@@ -293,6 +264,7 @@ Respond with a valid JSON with 1 key "sceneBreakdown", without any additional ex
             ...session.videoAnalysis,
             status: AnalysisStatus.COMPLETE,
             sceneBreakdown,
+            structuredData: structuredData ?? undefined,
           },
           status: SessionStatus.ANALYSIS_COMPLETE,
         });
@@ -307,6 +279,169 @@ Respond with a valid JSON with 1 key "sceneBreakdown", without any additional ex
         error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`Gemini analysis failed: ${errorMessage}`);
     }
+  }
+
+  /**
+   * Fixture analysis response used when MOCK_ANALYSIS=true, so the full
+   * pipeline (prompt variants + multi-clip video generation) can be
+   * exercised locally without any billed Gemini calls.
+   */
+  private buildMockAnalysisResponse(): string {
+    return JSON.stringify({
+      scenes: [
+        {
+          sceneIndex: 0,
+          timestamp: '0:00-0:02',
+          startTimeSeconds: 0,
+          duration: 2,
+          purpose: 'hook',
+          hookType: 'bold_claim',
+          visualDetails: {
+            cameraAngle: 'Medium close-up, slight upward pan',
+            movement: 'Hand holding product package toward camera',
+            lighting: 'Bright, even daylight',
+            colorPalette: 'Deep greens, crisp white text, warm skin tones',
+            onScreenElements: 'Product pouch with visible branding',
+          },
+          cinematicDetails: {
+            shotType: 'medium close-up',
+            pacing: 'Snappy, attention-grabbing open',
+            style: 'product reveal',
+            cutCount: 1,
+          },
+          audioDetails: {
+            dialogue: '"I didn\'t expect this to actually work."',
+            soundDesign: 'Upbeat modern background music, medium intensity',
+            timing: 'Dialogue begins immediately with the visual',
+          },
+          captions: [
+            {
+              text: 'WAIT FOR IT...',
+              position: 'top',
+              style: 'bold white sans-serif, pop-in',
+              startTime: 0,
+              endTime: 2,
+            },
+          ],
+        },
+        {
+          sceneIndex: 1,
+          timestamp: '0:02-0:05',
+          startTimeSeconds: 2,
+          duration: 3,
+          purpose: 'solution',
+          visualDetails: {
+            cameraAngle: 'Medium shot, static, then quick cut to detail shot',
+            movement: 'Presenter demonstrates the product',
+            lighting: 'Bright, even, consistent',
+            colorPalette: 'Vibrant product colors, clean white background',
+            onScreenElements: 'Product in use',
+          },
+          cinematicDetails: {
+            shotType: 'medium, then detail shot',
+            pacing: 'Quick, informative cuts',
+            style: 'lifestyle product demo',
+            cutCount: 2,
+          },
+          audioDetails: {
+            dialogue: '"It only takes ten seconds a day."',
+            soundDesign: 'Background music continues, steady energy',
+            timing: 'Dialogue starts with the shot',
+          },
+          captions: [
+            {
+              text: '10 SECONDS A DAY',
+              position: 'bottom',
+              style: 'bold highlight box',
+              startTime: 0,
+              endTime: 3,
+            },
+          ],
+        },
+        {
+          sceneIndex: 2,
+          timestamp: '0:05-0:07',
+          startTimeSeconds: 5,
+          duration: 2,
+          purpose: 'benefit',
+          visualDetails: {
+            cameraAngle: 'Medium close-up, presenter facing camera',
+            movement: 'Presenter gestures with excitement',
+            lighting: 'Bright, soft, even',
+            colorPalette: 'Warm skin tones, clean background',
+            onScreenElements: 'Product visible in hand',
+          },
+          cinematicDetails: {
+            shotType: 'medium close-up',
+            pacing: 'Energetic, testimonial delivery',
+            style: 'testimonial',
+            cutCount: 1,
+          },
+          audioDetails: {
+            dialogue: '"My results after two weeks were honestly wild."',
+            soundDesign: 'Music builds slightly',
+            timing: 'Delivered expressively over the whole scene',
+          },
+          captions: [],
+        },
+        {
+          sceneIndex: 3,
+          timestamp: '0:07-0:08',
+          startTimeSeconds: 7,
+          duration: 1,
+          purpose: 'cta',
+          visualDetails: {
+            cameraAngle: 'Overhead close-up',
+            movement: 'Product placed on clean surface',
+            lighting: 'Bright, highlighting product details',
+            colorPalette: 'Rich product colors, neutral background',
+            onScreenElements: 'Product + logo',
+          },
+          cinematicDetails: {
+            shotType: 'detail shot',
+            pacing: 'Fast final cut, punchy',
+            style: 'promotional CTA',
+            cutCount: 1,
+          },
+          audioDetails: {
+            dialogue: '"Link is in my bio, go grab yours."',
+            soundDesign: 'Music resolves on a flourish',
+            timing: 'Concludes on the final word',
+          },
+          captions: [
+            {
+              text: 'SHOP NOW ⬆️',
+              position: 'bottom',
+              style: 'bold, animated scale-up',
+              startTime: 0,
+              endTime: 1,
+            },
+          ],
+        },
+      ],
+      hook: {
+        type: 'bold_claim',
+        text: "I didn't expect this to actually work.",
+        durationSeconds: 2,
+      },
+      overallAesthetic: 'Bright, clean, authentic UGC testimonial style',
+      dominantColors: ['deep green', 'white', 'warm skin tones'],
+      pacing: 'Fast, punchy cuts with an average shot length of ~2 seconds',
+      audioStyle: 'Upbeat modern pop bed with a confident spoken voiceover',
+      musicStyle:
+        'Upbeat modern pop, medium-high energy, builds toward the CTA',
+      captionStyle: {
+        fontFamily: 'sans-serif',
+        textColor: '#FFFFFF',
+        backgroundStyle: 'bold text with subtle drop shadow',
+        position: 'bottom',
+        animation: 'pop-in per phrase',
+      },
+      recommendedAspectRatio: '9:16',
+      totalDurationSeconds: 8,
+      cutCount: 4,
+      averageShotDurationSeconds: 2,
+    });
   }
 
   /**
@@ -346,10 +481,14 @@ Respond with a valid JSON with 1 key "sceneBreakdown", without any additional ex
       throw new BadRequestException('Analysis not started');
     }
 
-    // Update with user edits
+    // Re-parse the user's edits so downstream prompt/video generation
+    // always has an up-to-date structured view of the scenes.
+    const structuredData = parseSceneAnalysis(editedText);
+
     const updatedAnalysis: VideoAnalysis = {
       ...session.videoAnalysis,
       userEdits: editedText,
+      structuredData: structuredData ?? session.videoAnalysis.structuredData,
     };
 
     this.sessionService.updateSession(sessionId, {

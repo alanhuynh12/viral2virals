@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
+import { AnalysisStructuredData } from '../types';
 
 interface AnalysisDisplayProps {
   analysisText: string;
   isAnalyzing: boolean;
   onEdit: (editedText: string) => void;
   onSave: () => void;
+  structuredData?: AnalysisStructuredData;
 }
 
 /**
@@ -17,6 +19,7 @@ export function AnalysisDisplay({
   isAnalyzing,
   onEdit,
   onSave,
+  structuredData,
 }: AnalysisDisplayProps) {
   const [editedText, setEditedText] = useState(analysisText);
   const [isEditing, setIsEditing] = useState(false);
@@ -66,6 +69,45 @@ export function AnalysisDisplay({
           </button>
         )}
       </div>
+
+      {structuredData && !isEditing && (
+        <div className="mb-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-blue-50 rounded-lg p-3 text-center">
+            <div className="text-xs text-blue-600 font-medium uppercase">
+              Hook Type
+            </div>
+            <div className="text-sm font-semibold text-blue-900 mt-1 capitalize">
+              {structuredData.hook?.type.replace(/_/g, ' ') || 'N/A'}
+            </div>
+          </div>
+          <div className="bg-purple-50 rounded-lg p-3 text-center">
+            <div className="text-xs text-purple-600 font-medium uppercase">
+              Scenes
+            </div>
+            <div className="text-sm font-semibold text-purple-900 mt-1">
+              {structuredData.scenes.length}
+            </div>
+          </div>
+          <div className="bg-orange-50 rounded-lg p-3 text-center">
+            <div className="text-xs text-orange-600 font-medium uppercase">
+              Cut Count
+            </div>
+            <div className="text-sm font-semibold text-orange-900 mt-1">
+              {structuredData.cutCount ?? 'N/A'}
+            </div>
+          </div>
+          <div className="bg-green-50 rounded-lg p-3 text-center">
+            <div className="text-xs text-green-600 font-medium uppercase">
+              Avg. Shot Length
+            </div>
+            <div className="text-sm font-semibold text-green-900 mt-1">
+              {structuredData.averageShotDurationSeconds
+                ? `${structuredData.averageShotDurationSeconds}s`
+                : 'N/A'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {isEditing ? (
         <div>

@@ -5,8 +5,12 @@
  * Provides base configuration and error handling.
  */
 
-import axios, { AxiosInstance, AxiosError } from 'axios';
-import { ModerationStatus } from '../types';
+import axios, { AxiosInstance, AxiosError, AxiosProgressEvent } from 'axios';
+import {
+  AnalysisStructuredData,
+  GenerationPromptVariant,
+  GeneratedVideoVariant,
+} from '../types';
 
 /**
  * API response wrapper
@@ -229,6 +233,7 @@ export interface VideoAnalysis {
   analyzedAt: string;
   status: 'pending' | 'processing' | 'complete' | 'failed';
   sceneBreakdown: string;
+  structuredData?: AnalysisStructuredData;
   userEdits?: string;
   error?: {
     code: string;
@@ -351,87 +356,77 @@ export async function submitProductInfo(
 }
 
 // ============================================================================
-// Prompt API Methods
+// Prompt Variant API Methods
 // ============================================================================
 
-export interface GenerationPrompt {
-  promptId: string;
-  generatedText: string;
-  userEditedText?: string;
-  finalText: string;
-  characterCount: number;
-  generatedAt: string;
-  approvedAt?: string;
-  moderationStatus: ModerationStatus;
-  moderationFlags?: string[];
-}
-
 /**
- * Generate text-to-video prompt from analysis and product info
+ * Generate a batch of hook/prompt variants from analysis and product info
  */
-export async function generatePrompt(
-  sessionId: string
-): Promise<GenerationPrompt> {
-  const response = await api.post<GenerationPrompt>(
-    `/sessions/${sessionId}/prompt`
+export async function generatePromptVariants(
+  sessionId: string,
+  count?: number
+): Promise<GenerationPromptVariant[]> {
+  const response = await api.post<GenerationPromptVariant[]>(
+    `/sessions/${sessionId}/prompt/variants`,
+    count ? { count } : {}
   );
 
   if (!response.data) {
-    throw new Error('Failed to generate prompt');
+    throw new Error('Failed to generate prompt variants');
   }
 
   // Handle double-wrapped response
   const data =
     'data' in response.data && typeof response.data.data === 'object'
-      ? (response.data.data as GenerationPrompt)
-      : response.data;
+      ? (response.data.data as unknown as GenerationPromptVariant[])
+      : (response.data as unknown as GenerationPromptVariant[]);
 
   return data;
 }
 
 /**
- * Update prompt with user edits
+ * Update a single prompt variant with user edits
  */
-export async function updatePrompt(
+export async function updatePromptVariant(
   sessionId: string,
+  variantId: string,
   editedText: string
-): Promise<GenerationPrompt> {
-  const response = await api.patch<GenerationPrompt>(
-    `/sessions/${sessionId}/prompt`,
+): Promise<GenerationPromptVariant> {
+  const response = await api.patch<GenerationPromptVariant>(
+    `/sessions/${sessionId}/prompt/variants/${variantId}`,
     { editedText }
   );
 
   if (!response.data) {
-    throw new Error('Failed to update prompt');
+    throw new Error('Failed to update prompt variant');
   }
 
-  // Handle double-wrapped response
   const data =
     'data' in response.data && typeof response.data.data === 'object'
-      ? (response.data.data as GenerationPrompt)
+      ? (response.data.data as GenerationPromptVariant)
       : response.data;
 
   return data;
 }
 
 /**
- * Approve prompt for video generation
+ * Approve a single prompt variant for video generation
  */
-export async function approvePrompt(
-  sessionId: string
-): Promise<GenerationPrompt> {
-  const response = await api.post<GenerationPrompt>(
-    `/sessions/${sessionId}/prompt/approve`
+export async function approvePromptVariant(
+  sessionId: string,
+  variantId: string
+): Promise<GenerationPromptVariant> {
+  const response = await api.post<GenerationPromptVariant>(
+    `/sessions/${sessionId}/prompt/variants/${variantId}/approve`
   );
 
   if (!response.data) {
-    throw new Error('Failed to approve prompt');
+    throw new Error('Failed to approve prompt variant');
   }
 
-  // Handle double-wrapped response
   const data =
     'data' in response.data && typeof response.data.data === 'object'
-      ? (response.data.data as GenerationPrompt)
+      ? (response.data.data as GenerationPromptVariant)
       : response.data;
 
   return data;
@@ -465,7 +460,8 @@ export async function uploadProductImage(
   const formData = new FormData();
   formData.append('image', file);
 
-  const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
+  const baseURL =
+    import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
   // Upload directly to backend using axios for progress tracking
   await axios.post(
@@ -475,7 +471,7 @@ export async function uploadProductImage(
       headers: {
         'Content-Type': 'multipart/form-data',
       },
-      onUploadProgress: (progressEvent: any) => {
+      onUploadProgress: (progressEvent: AxiosProgressEvent) => {
         if (onProgress && progressEvent.total) {
           const progress = (progressEvent.loaded / progressEvent.total) * 100;
           onProgress(Math.round(progress));
@@ -486,34 +482,16 @@ export async function uploadProductImage(
 }
 
 // ============================================================================
-// Video Generation API Methods
+// Video Generation API Methods (Google Veo 3 / 3.1, batch multi-clip)
 // ============================================================================
 
-export interface GeneratedVideo {
-  generatedVideoId: string;
-  s3Key: string;
-  s3Bucket: string;
-  fileName: string;
-  fileSize?: number;
-  mimeType: string;
-  status: 'pending' | 'processing' | 'complete' | 'failed';
-  initiatedAt: string;
-  completedAt?: string;
-  estimatedCompletionTime?: string;
-  downloadUrl?: string;
-  error?: {
-    code: string;
-    message: string;
-    timestamp: string;
-    retryable: boolean;
-  };
-}
-
 /**
- * Generate video using Sora 2
+ * Batch-generate multi-clip Veo videos for every approved prompt variant
  */
-export async function generateVideo(sessionId: string): Promise<GeneratedVideo> {
-  const response = await api.post<GeneratedVideo>(
+export async function generateVideos(
+  sessionId: string
+): Promise<GeneratedVideoVariant[]> {
+  const response = await api.post<GeneratedVideoVariant[]>(
     `/sessions/${sessionId}/generate`
   );
 
@@ -524,17 +502,19 @@ export async function generateVideo(sessionId: string): Promise<GeneratedVideo> 
   // Handle double-wrapped response
   const data =
     'data' in response.data && typeof response.data.data === 'object'
-      ? (response.data.data as GeneratedVideo)
-      : response.data;
+      ? (response.data.data as unknown as GeneratedVideoVariant[])
+      : (response.data as unknown as GeneratedVideoVariant[]);
 
   return data;
 }
 
 /**
- * Get video generation status (for polling)
+ * Get video generation status for every variant (for polling)
  */
-export async function getVideoStatus(sessionId: string): Promise<GeneratedVideo> {
-  const response = await api.get<GeneratedVideo>(
+export async function getVideoStatuses(
+  sessionId: string
+): Promise<GeneratedVideoVariant[]> {
+  const response = await api.get<GeneratedVideoVariant[]>(
     `/sessions/${sessionId}/generate`
   );
 
@@ -545,9 +525,8 @@ export async function getVideoStatus(sessionId: string): Promise<GeneratedVideo>
   // Handle double-wrapped response
   const data =
     'data' in response.data && typeof response.data.data === 'object'
-      ? (response.data.data as GeneratedVideo)
-      : response.data;
+      ? (response.data.data as unknown as GeneratedVideoVariant[])
+      : (response.data as unknown as GeneratedVideoVariant[]);
 
   return data;
 }
-

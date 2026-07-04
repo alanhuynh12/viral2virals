@@ -6,482 +6,413 @@ import {
 } from '@nestjs/common';
 import { SessionService } from '../../common/session.service';
 import { S3Service } from '../storage/s3.service';
+import { VeoService, VeoImageInput } from './veo.service';
+import { VideoStitchingService } from './video-stitching.service';
 import {
-  GeneratedVideo,
+  GeneratedVideoVariant,
   GenerationStatus,
   GenerationError,
+  SceneClipStatus,
 } from '../../common/types/generation.types';
+import { ScenePrompt } from '../../common/types/prompt.types';
 import { SessionStatus } from '../../common/types/session.types';
 import { loadConfiguration } from '../../config/configuration';
-import axios, { AxiosError } from 'axios';
+import { resolveVideoDimensions } from '../../common/utils/ffmpeg.util';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * GenerationService handles video generation using Sora 2 via laozhang.ai
+ * GenerationService orchestrates fast-paced, multi-clip advertisement
+ * video generation using Google Veo 3 / 3.1.
+ *
+ * For every approved prompt variant, each scene is rendered as its own
+ * short Veo clip (so cut timing, per-scene pacing, and dialogue stay
+ * tightly controlled), then all clips are stitched into a single vertical
+ * video with ffmpeg and uploaded to S3. Multiple variants can be
+ * generated and rendered in the same batch so different hook angles can
+ * be compared side-by-side.
  */
 @Injectable()
 export class GenerationService {
   private readonly logger = new Logger(GenerationService.name);
-  private readonly laozhangBaseUrl: string;
-  private readonly laozhangApiKey: string;
+  private readonly aspectRatio: string;
+  private readonly resolution: string;
 
   constructor(
     private readonly sessionService: SessionService,
     private readonly s3Service: S3Service,
+    private readonly veoService: VeoService,
+    private readonly stitchingService: VideoStitchingService,
   ) {
     const config = loadConfiguration();
-    this.laozhangBaseUrl = config.openai.baseUrl;
-    this.laozhangApiKey = config.openai.apiKey;
+    this.aspectRatio = config.veo.aspectRatio;
+    this.resolution = config.veo.resolution;
   }
 
   /**
-   * Generate video using Sora 2 via laozhang.ai
+   * Kick off video generation for every approved prompt variant that
+   * doesn't already have a video in progress/complete.
    * @param sessionId - Session UUID
-   * @returns Generated video metadata with pending status
+   * @returns The set of generated video variants (including ones already in progress)
    */
-  async generateVideo(sessionId: string): Promise<GeneratedVideo> {
+  async generateVideos(sessionId: string): Promise<GeneratedVideoVariant[]> {
     const session = this.sessionService.getSession(sessionId);
     if (!session) {
       throw new NotFoundException(`Session ${sessionId} not found`);
     }
 
-    // Validate prerequisites
-    if (!session.generationPrompt || !session.generationPrompt.approvedAt) {
+    const approvedVariants = (session.promptVariants || []).filter(
+      (v) => !!v.approvedAt,
+    );
+
+    if (approvedVariants.length === 0) {
       throw new BadRequestException(
-        'Prompt must be approved before generating video',
+        'At least one prompt variant must be approved before generating video',
       );
     }
 
-    if (
-      !session.productInformation ||
-      !session.productInformation.productImageS3Key
-    ) {
-      throw new BadRequestException(
-        'Product image must be uploaded before generating video',
+    const existingVideos = session.generatedVideoVariants || [];
+    const videosToKeep = existingVideos.filter(
+      (video) =>
+        !approvedVariants.some((v) => v.variantId === video.promptVariantId) ||
+        video.status === GenerationStatus.COMPLETE,
+    );
+
+    const newVideos: GeneratedVideoVariant[] = [];
+
+    for (const variant of approvedVariants) {
+      const alreadyComplete = existingVideos.find(
+        (video) =>
+          video.promptVariantId === variant.variantId &&
+          video.status === GenerationStatus.COMPLETE,
       );
+      if (alreadyComplete) {
+        continue;
+      }
+
+      const generatedVideoId = uuidv4();
+      const s3Key = this.s3Service.generateGeneratedVideoKey(
+        sessionId,
+        generatedVideoId,
+      );
+
+      const sceneClips: SceneClipStatus[] = variant.scenePrompts.map((sp) => ({
+        sceneIndex: sp.sceneIndex,
+        purpose: sp.purpose,
+        status: GenerationStatus.PENDING,
+      }));
+
+      const video: GeneratedVideoVariant = {
+        variantId: generatedVideoId,
+        promptVariantId: variant.variantId,
+        hookLabel: variant.hookLabel,
+        s3Key,
+        s3Bucket: 'viral2viral-videos',
+        fileName: `generated-${variant.hookLabel.toLowerCase().replace(/\s+/g, '-')}.mp4`,
+        mimeType: 'video/mp4',
+        status: GenerationStatus.PENDING,
+        sceneClips,
+        initiatedAt: new Date(),
+      };
+
+      newVideos.push(video);
     }
 
-    // Initialize generated video metadata
-    const generatedVideoId = uuidv4();
-    const s3Key = this.s3Service.generateGeneratedVideoKey(sessionId);
-
-    const generatedVideo: GeneratedVideo = {
-      generatedVideoId,
-      s3Key,
-      s3Bucket: 'viral2viral-videos', // From config
-      fileName: 'generated.mp4',
-      mimeType: 'video/mp4',
-      status: GenerationStatus.PENDING,
-      initiatedAt: new Date(),
-    };
-
-    // Update session state
+    const allVideos = [...videosToKeep, ...newVideos];
     this.sessionService.updateSession(sessionId, {
-      generatedVideo,
+      generatedVideoVariants: allVideos,
       status: SessionStatus.GENERATING_VIDEO,
     });
 
-    // Start async video generation (fire and forget)
-    this.processVideoGeneration(sessionId, generatedVideoId).catch((error) => {
+    // Process variants sequentially to stay within API rate limits/cost
+    // controls; scenes within a variant are also rendered sequentially so
+    // per-scene progress can be reported reliably.
+    this.processBatch(
+      sessionId,
+      newVideos.map((v) => v.variantId),
+    ).catch((error) => {
       this.logger.error(
-        `Video generation failed for session ${sessionId}:`,
+        `Unexpected error while processing video batch for session ${sessionId}:`,
         error,
       );
-
-      const currentSession = this.sessionService.getSession(sessionId);
-      if (!currentSession || !currentSession.generatedVideo) {
-        return;
-      }
-
-      const errorDetail: GenerationError = {
-        code: 'VIDEO_GENERATION_FAILED',
-        message: error.message || 'Unknown error during video generation',
-        timestamp: new Date(),
-        retryable: true,
-      };
-
-      // Update video with error, preserving all required fields
-      const currentVideo = currentSession.generatedVideo;
-      if (
-        !currentVideo.generatedVideoId ||
-        !currentVideo.s3Key ||
-        !currentVideo.s3Bucket ||
-        !currentVideo.fileName ||
-        !currentVideo.mimeType ||
-        !currentVideo.initiatedAt
-      ) {
-        this.logger.error(
-          'Generated video missing required fields, cannot update',
-        );
-        return;
-      }
-
-      const failedVideo: GeneratedVideo = {
-        generatedVideoId: currentVideo.generatedVideoId,
-        s3Key: currentVideo.s3Key,
-        s3Bucket: currentVideo.s3Bucket,
-        fileName: currentVideo.fileName,
-        mimeType: currentVideo.mimeType,
-        initiatedAt: currentVideo.initiatedAt,
-        status: GenerationStatus.FAILED,
-        error: errorDetail,
-      };
-
-      this.sessionService.updateSession(sessionId, {
-        generatedVideo: failedVideo,
-        status: SessionStatus.ERROR,
-      });
     });
 
-    return generatedVideo;
+    return allVideos;
   }
 
   /**
-   * Get video generation status
+   * Get the status of all generated video variants for a session
    * @param sessionId - Session UUID
-   * @returns Current video generation status
+   * @returns Current video generation statuses, with download URLs for completed ones
    */
-  async getVideoStatus(sessionId: string): Promise<GeneratedVideo> {
+  async getVideoStatus(sessionId: string): Promise<GeneratedVideoVariant[]> {
     const session = this.sessionService.getSession(sessionId);
     if (!session) {
       throw new NotFoundException(`Session ${sessionId} not found`);
     }
 
-    if (!session.generatedVideo) {
+    const videos = session.generatedVideoVariants || [];
+    if (videos.length === 0) {
       throw new NotFoundException('Video generation has not been initiated');
     }
 
-    // If video is complete, generate download URL
-    if (session.generatedVideo.status === GenerationStatus.COMPLETE) {
-      const downloadUrl = await this.s3Service.generatePresignedDownloadUrl(
-        session.generatedVideo.s3Key,
-        3600, // 1 hour
-      );
-
-      return {
-        ...session.generatedVideo,
-        downloadUrl,
-      };
-    }
-
-    return session.generatedVideo;
+    return Promise.all(
+      videos.map(async (video) => {
+        if (video.status === GenerationStatus.COMPLETE) {
+          const downloadUrl = await this.s3Service.generatePresignedDownloadUrl(
+            video.s3Key,
+            3600,
+          );
+          return { ...video, downloadUrl };
+        }
+        return video;
+      }),
+    );
   }
 
   /**
-   * Process video generation asynchronously
-   * @param sessionId - Session UUID
-   * @param _generatedVideoId - Generated video UUID (reserved for future use)
+   * Sequentially process a batch of newly-created video variants.
    */
-  private async processVideoGeneration(
+  private async processBatch(
     sessionId: string,
-    _generatedVideoId: string,
+    variantIds: string[],
   ): Promise<void> {
-    this.logger.log(`Starting video generation for session ${sessionId}`);
+    for (const variantId of variantIds) {
+      try {
+        await this.processVariant(sessionId, variantId);
+      } catch (error) {
+        this.logger.error(
+          `Video generation failed for variant ${variantId} (session ${sessionId}):`,
+          error,
+        );
+        this.markVariantFailed(sessionId, variantId, error);
+      }
+    }
+  }
 
+  /**
+   * Render every scene clip for a single variant with Veo, stitch them
+   * together, and upload the final video to S3.
+   */
+  private async processVariant(
+    sessionId: string,
+    generatedVideoId: string,
+  ): Promise<void> {
     const session = this.sessionService.getSession(sessionId);
-    if (!session || !session.generatedVideo) {
-      throw new Error('Session or generated video not found');
+    if (!session) {
+      throw new Error('Session not found');
     }
 
-    // Validate session has all required data
-    if (
-      !session.productInformation ||
-      !session.productInformation.productImageS3Key
-    ) {
-      throw new Error('Product image not found');
+    const video = session.generatedVideoVariants?.find(
+      (v) => v.variantId === generatedVideoId,
+    );
+    if (!video) {
+      throw new Error('Generated video record not found');
     }
 
-    if (!session.generationPrompt || !session.generationPrompt.finalText) {
-      throw new Error('Generation prompt not found');
+    const promptVariant = session.promptVariants?.find(
+      (v) => v.variantId === video.promptVariantId,
+    );
+    if (!promptVariant || promptVariant.scenePrompts.length === 0) {
+      throw new Error('Approved prompt variant not found');
     }
 
-    // Update status to processing
-    const currentVideo = session.generatedVideo;
-    if (
-      !currentVideo.generatedVideoId ||
-      !currentVideo.s3Key ||
-      !currentVideo.s3Bucket ||
-      !currentVideo.fileName ||
-      !currentVideo.mimeType ||
-      !currentVideo.initiatedAt
-    ) {
-      throw new Error('Generated video missing required fields');
-    }
-
-    const processingVideo: GeneratedVideo = {
-      generatedVideoId: currentVideo.generatedVideoId,
-      s3Key: currentVideo.s3Key,
-      s3Bucket: currentVideo.s3Bucket,
-      fileName: currentVideo.fileName,
-      mimeType: currentVideo.mimeType,
-      initiatedAt: currentVideo.initiatedAt,
+    this.updateVideoRecord(sessionId, generatedVideoId, {
       status: GenerationStatus.PROCESSING,
-    };
-
-    this.sessionService.updateSession(sessionId, {
-      generatedVideo: processingVideo,
     });
 
-    try {
-      // Download product image from S3 and convert to base64
-      const imageS3Key = session.productInformation.productImageS3Key;
-      const imageBuffer = await this.s3Service.downloadBuffer(imageS3Key);
-      const imageMimeType =
-        session.productInformation.productImageMimeType || 'image/png';
-      const imageBase64 = `data:${imageMimeType};base64,${imageBuffer.toString('base64')}`;
-
-      // Get approved prompt
-      const prompt = session.generationPrompt.finalText;
-
-      // Call Sora 2 API via laozhang.ai
-      const requestPayload = {
-        model: 'sora-2',
-        n: 1,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: prompt,
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: imageBase64,
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      this.logger.log('Calling laozhang.ai Sora 2 API...');
-
-      // PROD
-      const response = await axios.post(
-        `${this.laozhangBaseUrl}/chat/completions`,
-        requestPayload,
-        {
-          headers: {
-            Authorization: `Bearer ${this.laozhangApiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 600000, // 10 minutes timeout for video generation
-        },
-      );
-
-      // Extract video URL from response
-      if (!response.data.choices || response.data.choices.length === 0) {
-        throw new Error('No response choices received from Sora 2 API');
-      }
-
-      const content = response.data.choices[0].message.content;
-      const videoUrl = this.extractVideoUrl(content);
-
-      // DEBUG: Using a placeholder video URL for now
-      // const videoUrl =
-      //   'https://mycnd-hz.oss-cn-hangzhou.aliyuncs.com/sora/459bd9cb-cd9f-4295-8bac-fcfb764b4b5e.mp4';
-
-      if (!videoUrl) {
-        throw new Error('No video URL found in API response');
-      }
-
-      this.logger.log(`Video generated, downloading from: ${videoUrl}`);
-
-      // Download video from URL
-      const videoResponse = await axios.get(videoUrl, {
-        responseType: 'arraybuffer',
-        timeout: 300000, // 5 minutes timeout for download
-      });
-
-      const videoBuffer = Buffer.from(videoResponse.data);
-
-      // Upload to S3
-      const s3Key = this.s3Service.generateGeneratedVideoKey(sessionId);
-      await this.s3Service.uploadBuffer(s3Key, videoBuffer, 'video/mp4');
-
-      this.logger.log(`Video uploaded to S3: ${s3Key}`);
-
-      // Update session with completion
-      const currentSession = this.sessionService.getSession(sessionId);
-      if (!currentSession?.generatedVideo) {
-        throw new Error('Generated video not found in session');
-      }
-
-      const currentVideo = currentSession.generatedVideo;
-      if (
-        !currentVideo.generatedVideoId ||
-        !currentVideo.s3Key ||
-        !currentVideo.s3Bucket ||
-        !currentVideo.fileName ||
-        !currentVideo.mimeType ||
-        !currentVideo.initiatedAt
-      ) {
-        throw new Error('Generated video missing required fields');
-      }
-
-      const completedVideo: GeneratedVideo = {
-        generatedVideoId: currentVideo.generatedVideoId,
-        s3Key: currentVideo.s3Key,
-        s3Bucket: currentVideo.s3Bucket,
-        fileName: currentVideo.fileName,
-        mimeType: currentVideo.mimeType,
-        initiatedAt: currentVideo.initiatedAt,
-        status: GenerationStatus.COMPLETE,
-        completedAt: new Date(),
-        fileSize: videoBuffer.length,
-      };
-
-      this.sessionService.updateSession(sessionId, {
-        generatedVideo: completedVideo,
-        status: SessionStatus.VIDEO_COMPLETE,
-      });
-
-      this.logger.log(`Video generation complete for session ${sessionId}`);
-    } catch (error) {
-      this.logger.error(`Error during video generation:`, error);
-
-      const errorMessage = this.extractErrorMessage(error);
-      const errorCode = this.categorizeError(error);
-
-      const errorDetail: GenerationError = {
-        code: errorCode,
-        message: errorMessage,
-        timestamp: new Date(),
-        retryable: this.isRetryableError(error),
-      };
-
-      const currentSession = this.sessionService.getSession(sessionId);
-      if (currentSession?.generatedVideo) {
-        const currentVideo = currentSession.generatedVideo;
-        if (
-          !currentVideo.generatedVideoId ||
-          !currentVideo.s3Key ||
-          !currentVideo.s3Bucket ||
-          !currentVideo.fileName ||
-          !currentVideo.mimeType ||
-          !currentVideo.initiatedAt
-        ) {
-          this.logger.error(
-            'Generated video missing required fields, cannot update',
-          );
-        } else {
-          const failedVideo: GeneratedVideo = {
-            generatedVideoId: currentVideo.generatedVideoId,
-            s3Key: currentVideo.s3Key,
-            s3Bucket: currentVideo.s3Bucket,
-            fileName: currentVideo.fileName,
-            mimeType: currentVideo.mimeType,
-            initiatedAt: currentVideo.initiatedAt,
-            status: GenerationStatus.FAILED,
-            error: errorDetail,
-          };
-
-          this.sessionService.updateSession(sessionId, {
-            generatedVideo: failedVideo,
-            status: SessionStatus.ERROR,
-          });
-        }
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * Extract video URL from markdown-formatted response content
-   * @param content - Response content from Sora 2 API
-   * @returns Video URL or null if not found
-   */
-  private extractVideoUrl(content: string): string | null {
-    // Match markdown link format: [text](url)
-    const linkRegex = /\[.*?\]\((https?:\/\/[^)]+)\)/g;
-    const matches = [...content.matchAll(linkRegex)];
-
-    // Find first URL that looks like a video (ends with .mp4 or contains video-related keywords)
-    for (const match of matches) {
-      const url = match[1];
-      if (url.endsWith('.mp4') || url.includes('video')) {
-        return url;
-      }
-    }
-
-    // If no specific video URL found, return first URL
-    return matches.length > 0 ? matches[0][1] : null;
-  }
-
-  /**
-   * Extract error message from various error types
-   * @param error - Error object
-   * @returns User-friendly error message
-   */
-  private extractErrorMessage(error: unknown): string {
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError;
-      if (axiosError.response?.data) {
-        const data = axiosError.response.data as {
-          error?: { message?: string };
-          message?: string;
+    // Optionally anchor the first scene with the uploaded product image so
+    // the product's real appearance carries through the whole video.
+    let firstSceneImage: VeoImageInput | undefined;
+    const imageS3Key = session.productInformation?.productImageS3Key;
+    if (imageS3Key) {
+      try {
+        const imageBuffer = await this.s3Service.downloadBuffer(imageS3Key);
+        firstSceneImage = {
+          imageBytes: imageBuffer.toString('base64'),
+          mimeType:
+            session.productInformation?.productImageMimeType || 'image/png',
         };
-        return (
-          data.error?.message || data.message || 'Video generation API error'
+      } catch (error) {
+        this.logger.warn(
+          `Could not load product image for session ${sessionId}, continuing text-only: ${error}`,
         );
       }
-      return axiosError.message || 'Network error during video generation';
     }
 
-    if (error instanceof Error) {
-      return error.message;
-    }
+    const clipBuffers: Buffer[] = [];
 
-    return 'Unknown error during video generation';
-  }
+    for (let i = 0; i < promptVariant.scenePrompts.length; i++) {
+      const scenePrompt: ScenePrompt = promptVariant.scenePrompts[i];
 
-  /**
-   * Categorize error for error codes
-   * @param error - Error object
-   * @returns Error code
-   */
-  private categorizeError(error: unknown): string {
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError;
-      if (
-        axiosError.code === 'ECONNABORTED' ||
-        axiosError.code === 'ETIMEDOUT'
-      ) {
-        return 'VIDEO_GENERATION_TIMEOUT';
-      }
-      if (axiosError.response?.status === 429) {
-        return 'VIDEO_GENERATION_RATE_LIMIT';
-      }
-      if (axiosError.response?.status && axiosError.response.status >= 500) {
-        return 'VIDEO_GENERATION_SERVER_ERROR';
-      }
-      return 'VIDEO_GENERATION_API_ERROR';
-    }
-
-    return 'VIDEO_GENERATION_FAILED';
-  }
-
-  /**
-   * Determine if error is retryable
-   * @param error - Error object
-   * @returns True if error is retryable
-   */
-  private isRetryableError(error: unknown): boolean {
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError;
-      // Retry on timeout, rate limit, or server errors
-      return (
-        axiosError.code === 'ECONNABORTED' ||
-        axiosError.code === 'ETIMEDOUT' ||
-        axiosError.response?.status === 429 ||
-        (axiosError.response?.status !== undefined &&
-          axiosError.response.status >= 500)
+      this.updateSceneClipStatus(
+        sessionId,
+        generatedVideoId,
+        scenePrompt.sceneIndex,
+        GenerationStatus.PROCESSING,
       );
+
+      try {
+        const clipBuffer = await this.veoService.generateClip({
+          prompt: scenePrompt.text,
+          durationSeconds: scenePrompt.durationSeconds,
+          image: i === 0 ? firstSceneImage : undefined,
+        });
+
+        clipBuffers.push(clipBuffer);
+
+        this.updateSceneClipStatus(
+          sessionId,
+          generatedVideoId,
+          scenePrompt.sceneIndex,
+          GenerationStatus.COMPLETE,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.updateSceneClipStatus(
+          sessionId,
+          generatedVideoId,
+          scenePrompt.sceneIndex,
+          GenerationStatus.FAILED,
+          message,
+        );
+        throw new Error(
+          `Scene ${scenePrompt.sceneIndex + 1}/${promptVariant.scenePrompts.length} failed to render: ${message}`,
+        );
+      }
     }
 
-    return false;
+    this.logger.log(
+      `All ${clipBuffers.length} scene clips rendered for variant ${generatedVideoId}, stitching...`,
+    );
+
+    const dimensions = resolveVideoDimensions(
+      this.aspectRatio,
+      this.resolution,
+    );
+    const stitchedBuffer = await this.stitchingService.stitchClips(
+      clipBuffers,
+      dimensions,
+    );
+
+    const currentVideo = this.getVideoRecord(sessionId, generatedVideoId);
+    if (!currentVideo) {
+      throw new Error('Generated video record disappeared during processing');
+    }
+
+    await this.s3Service.uploadBuffer(
+      currentVideo.s3Key,
+      stitchedBuffer,
+      'video/mp4',
+    );
+
+    this.updateVideoRecord(sessionId, generatedVideoId, {
+      status: GenerationStatus.COMPLETE,
+      completedAt: new Date(),
+      fileSize: stitchedBuffer.length,
+    });
+
+    this.maybeMarkSessionComplete(sessionId);
+
+    this.logger.log(
+      `Video generation complete for variant ${generatedVideoId} (session ${sessionId})`,
+    );
+  }
+
+  private markVariantFailed(
+    sessionId: string,
+    generatedVideoId: string,
+    error: unknown,
+  ): void {
+    const errorDetail: GenerationError = {
+      code: 'VIDEO_GENERATION_FAILED',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date(),
+      retryable: true,
+    };
+
+    this.updateVideoRecord(sessionId, generatedVideoId, {
+      status: GenerationStatus.FAILED,
+      error: errorDetail,
+    });
+
+    this.maybeMarkSessionComplete(sessionId);
+  }
+
+  private getVideoRecord(
+    sessionId: string,
+    variantId: string,
+  ): GeneratedVideoVariant | undefined {
+    const session = this.sessionService.getSession(sessionId);
+    return session?.generatedVideoVariants?.find(
+      (v) => v.variantId === variantId,
+    );
+  }
+
+  private updateVideoRecord(
+    sessionId: string,
+    variantId: string,
+    updates: Partial<GeneratedVideoVariant>,
+  ): void {
+    const session = this.sessionService.getSession(sessionId);
+    if (!session?.generatedVideoVariants) return;
+
+    const videos = session.generatedVideoVariants.map((v) =>
+      v.variantId === variantId ? { ...v, ...updates } : v,
+    );
+
+    this.sessionService.updateSession(sessionId, {
+      generatedVideoVariants: videos,
+    });
+  }
+
+  private updateSceneClipStatus(
+    sessionId: string,
+    variantId: string,
+    sceneIndex: number,
+    status: GenerationStatus,
+    error?: string,
+  ): void {
+    const session = this.sessionService.getSession(sessionId);
+    if (!session?.generatedVideoVariants) return;
+
+    const videos = session.generatedVideoVariants.map((v) => {
+      if (v.variantId !== variantId) return v;
+      return {
+        ...v,
+        sceneClips: v.sceneClips.map((clip) =>
+          clip.sceneIndex === sceneIndex ? { ...clip, status, error } : clip,
+        ),
+      };
+    });
+
+    this.sessionService.updateSession(sessionId, {
+      generatedVideoVariants: videos,
+    });
+  }
+
+  /**
+   * Flip the overall session status to VIDEO_COMPLETE once every generated
+   * video variant has reached a terminal state (complete or failed).
+   */
+  private maybeMarkSessionComplete(sessionId: string): void {
+    const session = this.sessionService.getSession(sessionId);
+    if (!session?.generatedVideoVariants) return;
+
+    const allTerminal = session.generatedVideoVariants.every(
+      (v) =>
+        v.status === GenerationStatus.COMPLETE ||
+        v.status === GenerationStatus.FAILED,
+    );
+
+    if (allTerminal) {
+      const anyComplete = session.generatedVideoVariants.some(
+        (v) => v.status === GenerationStatus.COMPLETE,
+      );
+      this.sessionService.updateSession(sessionId, {
+        status: anyComplete
+          ? SessionStatus.VIDEO_COMPLETE
+          : SessionStatus.ERROR,
+      });
+    }
   }
 }

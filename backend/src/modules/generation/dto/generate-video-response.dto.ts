@@ -1,11 +1,11 @@
-import { GeneratedVideo } from '../../../common/types/generation.types';
+import { GeneratedVideoVariant } from '../../../common/types/generation.types';
 
 /**
- * DTO for video generation initiation response
+ * DTO for batch video generation initiation response
  */
 export class GenerateVideoResponseDto {
   success!: boolean;
-  data!: GeneratedVideo;
+  data!: GeneratedVideoVariant[];
   meta!: {
     timestamp: string;
     requestId: string;

@@ -2,6 +2,9 @@
  * Generation Types
  *
  * Defines generated video structures and processing status.
+ * Video generation happens per prompt variant: each variant is rendered
+ * as several short Veo clips (one per scene) which are then stitched
+ * into a single fast-paced vertical video.
  */
 
 /**
@@ -32,13 +35,37 @@ export interface GenerationError {
 }
 
 /**
- * GeneratedVideo represents the newly created advertisement video
+ * Tracks the render status of a single scene clip within a variant.
  */
-export interface GeneratedVideo {
-  /** Unique identifier (UUID) */
-  generatedVideoId: string;
+export interface SceneClipStatus {
+  /** Zero-based index matching the source ScenePrompt */
+  sceneIndex: number;
 
-  /** S3 object key for generated video */
+  /** Scene purpose label, for progress display */
+  purpose: string;
+
+  /** Render status of this individual clip */
+  status: GenerationStatus;
+
+  /** Error message if this clip failed to render */
+  error?: string;
+}
+
+/**
+ * GeneratedVideoVariant represents one fully rendered advertisement video
+ * (a stitched sequence of scene clips) produced from an approved prompt variant.
+ */
+export interface GeneratedVideoVariant {
+  /** Unique identifier (UUID) */
+  variantId: string;
+
+  /** ID of the GenerationPromptVariant this video was rendered from */
+  promptVariantId: string;
+
+  /** Human-readable hook label, copied from the prompt variant for display */
+  hookLabel: string;
+
+  /** S3 object key for the final stitched video */
   s3Key: string;
 
   /** S3 bucket name */
@@ -53,17 +80,17 @@ export interface GeneratedVideo {
   /** MIME type (typically video/mp4) */
   mimeType: string;
 
-  /** Processing status */
+  /** Overall processing status for this variant */
   status: GenerationStatus;
+
+  /** Per-scene clip render progress */
+  sceneClips: SceneClipStatus[];
 
   /** When generation was started */
   initiatedAt: Date;
 
   /** When generation finished (optional) */
   completedAt?: Date;
-
-  /** Estimated completion (if available, optional) */
-  estimatedCompletionTime?: Date;
 
   /** Presigned download URL (temporary, generated on request, optional) */
   downloadUrl?: string;

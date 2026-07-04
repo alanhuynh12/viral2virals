@@ -1,0 +1,40 @@
+# Render Blueprint for the viral2viral backend.
+# Deploy: https://render.com/docs/blueprint-spec
+#
+# Only the backend is defined here since the frontend is best deployed to
+# Vercel (see frontend/vercel.json) as a static Vite build.
+services:
+  - type: web
+    name: viral2viral-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_S3_BUCKET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: VEO_MODEL
+        value: veo-3.1-fast-generate-preview
+      - key: VEO_ASPECT_RATIO
+        value: '9:16'
+      - key: VEO_RESOLUTION
+        value: 720p
+      - key: LAOZHANG_API_KEY
+        sync: false
+      - key: LAOZHANG_API_BASE_URL
+        value: https://api.laozhang.ai/v1
+      - key: CORS_ORIGIN
+        sync: false
